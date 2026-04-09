@@ -1,0 +1,20 @@
+[project]
+name = "crewtui"
+version = "1.0.0"
+description = "CrewTUI — Config-driven CrewAI Terminal UI with heartbeat task engine"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "crewai[litellm,tools]>=1.14.1",
+    "duckduckgo-search>=8.1.1",
+    "pyperclip>=1.11.0",
+    "python-dotenv>=1.1.1",
+    "tavily-python>=0.7.23",
+    "textual>=8.2.3",
+]
+
+[project.scripts]
+crewtui = "cli:main"
+
+[tool.setuptools]
+py-modules = ["cli", "tui", "crew", "heartbeat", "agent_memory", "model_wizard", "telegram_notify", "config_loader", "setup_wizard"]

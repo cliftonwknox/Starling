@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets
+.env
+telegram_config.json
+
+# Runtime data
+project_config.json
+heartbeat_config.json
+task_queue.json
+run_history.json
+agent_config.json
+model_presets.json
+memory/
+output/
+skills/
