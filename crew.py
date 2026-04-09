@@ -11,7 +11,7 @@ import litellm
 from crewai import Agent, Task, Crew, LLM
 from crewai.tools import BaseTool
 from crewai_tools import ScrapeWebsiteTool
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from pydantic import Field
 
 # xAI models don't support 'stop' parameter - drop it globally
@@ -27,8 +27,7 @@ class DDGSearchTool(BaseTool):
 
     def _run(self, query: str) -> str:
         try:
-            with DDGS() as ddgs:
-                results = list(ddgs.text(query, max_results=self.max_results))
+            results = DDGS().text(query, max_results=self.max_results)
             if not results:
                 return "No results found."
             output = []
@@ -108,16 +107,46 @@ CREWAI_TOOLS_CATALOG = {
 }
 
 
-def load_crewai_tool(tool_name: str):
-    """Load a crewai_tools class by name and return an instance."""
-    try:
-        import crewai_tools
-        cls = getattr(crewai_tools, tool_name, None)
-        if cls and inspect.isclass(cls):
-            return cls()
-    except Exception:
-        pass
-    return None
+class LazyCrewAITool(BaseTool):
+    """Proxy that defers crewai_tools instantiation until first use."""
+    name: str = "Loading..."
+    description: str = "Tool loading on first use"
+    _tool_class_name: str = ""
+    _inner: object = None
+
+    def __init__(self, class_name: str, **kwargs):
+        catalog_desc = CREWAI_TOOLS_CATALOG.get(class_name, "CrewAI tool")
+        super().__init__(
+            name=class_name,
+            description=catalog_desc,
+            _tool_class_name=class_name,
+            **kwargs,
+        )
+
+    def _get_inner(self):
+        if self._inner is None:
+            try:
+                import crewai_tools
+                cls = getattr(crewai_tools, self._tool_class_name, None)
+                if cls and inspect.isclass(cls):
+                    # Some tools need a directory/file path argument
+                    if self._tool_class_name in ("DirectoryReadTool", "DirectorySearchTool"):
+                        try:
+                            from config_loader import get_work_dir
+                            self._inner = cls(directory=get_work_dir())
+                        except Exception:
+                            self._inner = cls(directory=".")
+                    else:
+                        self._inner = cls()
+            except Exception:
+                pass
+        return self._inner
+
+    def _run(self, query: str) -> str:
+        inner = self._get_inner()
+        if inner is None:
+            return f"Tool {self._tool_class_name} failed to load."
+        return inner._run(query)
 
 
 # === Custom Skills (skills/ directory) ===
@@ -185,18 +214,16 @@ def build_tool_registry(skills_dir: str = None) -> dict:
 
 
 def resolve_tools(tool_ids: list, skills_dir: str = None) -> list:
-    """Given a list of tool IDs from config, return actual tool instances."""
+    """Given a list of tool IDs from config, return actual tool instances.
+    CrewAI tools use lazy proxies — only instantiated on first use."""
     registry = build_tool_registry(skills_dir)
     tools = []
     for tid in tool_ids:
         if tid in registry:
             tools.append(registry[tid]["instance"])
         elif tid.startswith("crewai:"):
-            # Load crewai ecosystem tool on demand
             class_name = tid.split(":", 1)[1]
-            instance = load_crewai_tool(class_name)
-            if instance:
-                tools.append(instance)
+            tools.append(LazyCrewAITool(class_name))
         # silently skip unknown tools
     return tools
 
@@ -323,10 +350,33 @@ def build_crew_from_config(project_config: dict, presets: dict, mission: str = N
     return crew, components
 
 
+def _get_out_dir():
+    try:
+        from config_loader import get_output_dir
+        return get_output_dir()
+    except Exception:
+        d = os.path.join(os.path.dirname(__file__), "output")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+
+def _out(filename: str) -> str:
+    """Return output path. CrewAI prepends CWD to output_file, so if our
+    output dir is absolute, we need to make it relative to CWD."""
+    out_dir = _get_out_dir()
+    full_path = os.path.join(out_dir, filename)
+    # Make relative to CWD so CrewAI doesn't double the path
+    try:
+        return os.path.relpath(full_path)
+    except ValueError:
+        return full_path
+
+
 def _generate_mission_tasks(mission: str, agents: dict, agents_cfg: list) -> list:
     """Generate a standard task pipeline for an ad-hoc mission."""
     agent_ids = list(agents.keys())
     tasks = []
+    ts = __import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')
 
     # If multiple agents, create parallel research + compile + review
     if len(agent_ids) >= 3:
@@ -348,7 +398,7 @@ def _generate_mission_tasks(mission: str, agents: dict, agents_cfg: list) -> lis
             description="Compile all research into a single executive report with summary, findings, recommendations, and next steps.",
             expected_output="A comprehensive report in markdown.",
             agent=agents[compile_agent_id],
-            output_file=f"output/report_{__import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+            output_file=_out(f"report_{ts}.md"),
             context=research_tasks,
         )
         tasks.append(compile_task)
@@ -359,7 +409,7 @@ def _generate_mission_tasks(mission: str, agents: dict, agents_cfg: list) -> lis
             expected_output="Review with final decision and next steps.",
             agent=agents[agent_ids[0]],
             context=[compile_task],
-            output_file=f"output/decision_{__import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+            output_file=_out(f"decision_{ts}.md"),
         )
         tasks.append(review_task)
     elif len(agent_ids) == 2:
@@ -368,14 +418,14 @@ def _generate_mission_tasks(mission: str, agents: dict, agents_cfg: list) -> lis
             description=f"Research thoroughly:\n\n{mission}\n\nProvide detailed findings.",
             expected_output="A detailed report in markdown.",
             agent=agents[agent_ids[1]],
-            output_file=f"output/report_{__import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+            output_file=_out(f"report_{ts}.md"),
         )
         t2 = Task(
             description="Review the findings and provide your final decision with next steps.",
             expected_output="Review with decision.",
             agent=agents[agent_ids[0]],
             context=[t1],
-            output_file=f"output/decision_{__import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+            output_file=_out(f"decision_{ts}.md"),
         )
         tasks = [t1, t2]
     else:
@@ -384,7 +434,7 @@ def _generate_mission_tasks(mission: str, agents: dict, agents_cfg: list) -> lis
             description=f"Complete the following task:\n\n{mission}\n\nProvide a thorough response.",
             expected_output="A detailed response in markdown.",
             agent=agents[agent_ids[0]],
-            output_file=f"output/result_{__import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+            output_file=_out(f"result_{ts}.md"),
         )
         tasks = [t]
 

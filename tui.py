@@ -20,8 +20,25 @@ import json
 import threading
 from datetime import datetime
 
+import logging
+
 from model_wizard import load_presets as _load_model_presets
 MODEL_PRESETS = _load_model_presets()
+
+# Log to file so crew errors are visible
+_log_path = None
+try:
+    from config_loader import get_data_file
+    _log_path = get_data_file("crewtui.log")
+except Exception:
+    _log_path = os.path.join(os.path.dirname(__file__), "crewtui.log")
+logging.basicConfig(
+    filename=_log_path,
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("crewtui")
 
 
 def _output_dir():
@@ -84,6 +101,8 @@ HELP_TEXT = """[bold]Commands:[/]
   [cyan]/skills[/] unassign <tool> <agent> — Remove tool from agent
   [cyan]/skills[/] new           — Scaffold custom skill template
   [cyan]/skills[/] refresh       — Rescan skills directory
+  [cyan]/delete[/] <file>        — Delete an output file
+  [cyan]/delete[/] all           — Delete all output files
   [cyan]/copy[/]                 — Copy current panel to clipboard (or Ctrl+Y)
   [cyan]/help[/]                 — Show this help
   [cyan]/clear[/]                — Clear current agent's log
@@ -252,12 +271,12 @@ class CrewTUIApp(App):
     AgentPanel { height: 1fr; }
     #prompt-bar {
         dock: bottom;
-        height: 3;
+        height: 5;
         padding: 0 1;
         background: $surface;
     }
     #prompt-bar.focused-mode {
-        height: 5;
+        height: 7;
     }
     #prompt-input { width: 1fr; }
     #agent-select {
@@ -291,6 +310,15 @@ class CrewTUIApp(App):
         text-align: center;
         padding: 4;
     }
+    #activity-bar {
+        dock: bottom;
+        height: 1;
+        background: $primary-background;
+        padding: 0 1;
+    }
+    #activity-bar.idle {
+        display: none;
+    }
     """
 
     BINDINGS = [
@@ -300,6 +328,7 @@ class CrewTUIApp(App):
         Binding("f9", "show_config", "Config"),
         Binding("ctrl+y", "copy_panel", "Copy"),
         Binding("ctrl+v", "paste_clipboard", "Paste"),
+        Binding("ctrl+q", "quit", "Quit"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -377,6 +406,7 @@ class CrewTUIApp(App):
         first_color = first_agent.get("color", "cyan") if first_agent else "cyan"
         first_name = first_agent.get("name", "?") if first_agent else "?"
 
+        yield Static("", id="activity-bar", classes="idle")
         with Horizontal(id="prompt-bar"):
             yield Static(f"[bold {first_color}]{first_name}[/] > ", id="agent-select")
             yield Input(
@@ -424,6 +454,47 @@ class CrewTUIApp(App):
             heartbeat.start()
             self.notify("Heartbeat auto-started")
             self._load_queue_view()
+
+    def _show_activity(self, text: str):
+        """Show the activity bar with a message."""
+        bar = self.query_one("#activity-bar", Static)
+        bar.update(text)
+        bar.remove_class("idle")
+
+    def _hide_activity(self):
+        """Hide the activity bar."""
+        bar = self.query_one("#activity-bar", Static)
+        bar.add_class("idle")
+
+    def _update_activity(self):
+        """Update activity bar based on current state."""
+        if self.crew_running:
+            # Build status from agent panels
+            working = []
+            for a in self._agents_cfg:
+                try:
+                    panel = self.query_one(f"#panel-{a['id']}", AgentPanel)
+                    status_widget = self.query_one(f"#status-{a['id']}", Static)
+                    rendered = status_widget.render()
+                    text = str(rendered)
+                    if "working" in text or "thinking" in text or "waiting" in text:
+                        working.append(a["name"])
+                except Exception:
+                    pass
+            if working:
+                dots = "." * (int(datetime.now().timestamp()) % 4)
+                self._show_activity(f"[bold yellow]CREW RUNNING[/] | Active: {', '.join(working)}{dots}")
+            else:
+                dots = "." * (int(datetime.now().timestamp()) % 4)
+                self._show_activity(f"[bold yellow]CREW RUNNING{dots}[/]")
+        elif self._heartbeat and self._heartbeat.running:
+            st = self._heartbeat.status()
+            if st["active"] > 0:
+                self._show_activity(f"[bold cyan]HEARTBEAT[/] | Processing task{' ' * (int(datetime.now().timestamp()) % 3)}")
+            else:
+                self._show_activity(f"[dim]HEARTBEAT IDLE[/] | Pending: {st['pending']}")
+        else:
+            self._hide_activity()
 
     def _ensure_components(self):
         if self._components is None:
@@ -763,6 +834,7 @@ class CrewTUIApp(App):
 
     def on_crew_finished(self, message: CrewFinished) -> None:
         self.crew_running = False
+        self._hide_activity()
         if message.success:
             self.notify("Crew run completed!", severity="information")
             for aid in self._agent_ids:
@@ -901,11 +973,14 @@ class CrewTUIApp(App):
 
     def _start_crew_run(self, mission: str = None):
         if self.crew_running:
-            self.notify("Crew is already running!", severity="warning")
+            self.crew_running = False  # Reset stuck flag
+            self.notify("Crew flag was stuck — reset. Try again.", severity="warning")
             return
         self.crew_running = True
         label = mission[:50] + "..." if mission and len(mission) > 50 else (mission or "default tasks")
         self.notify(f"Starting crew: {label}")
+        self._show_activity(f"[bold yellow]CREW STARTING:[/] {label}")
+        self.set_interval(2, self._update_activity, name="activity-pulse")
         for aid in self._agent_ids:
             panel = self.query_one(f"#panel-{aid}", AgentPanel)
             panel.clear()
@@ -915,21 +990,47 @@ class CrewTUIApp(App):
 
     def _run_crew_thread(self, mission: str = None):
         start_time = datetime.now()
+        logger.info(f"Crew thread started: {mission or 'default'}")
         try:
             from crew import build_crew_from_config
             out_dir = _output_dir()
             os.makedirs(out_dir, exist_ok=True)
 
+            logger.info("Building crew from config...")
             crew, components = build_crew_from_config(self._project_config, MODEL_PRESETS, mission=mission)
             self._components = components
+            logger.info(f"Crew built: {len(crew.tasks)} tasks, {len(components['agents'])} agents")
+            for i, t in enumerate(crew.tasks):
+                agent_role = getattr(t.agent, 'role', '?') if t.agent else '?'
+                logger.info(f"  Task {i}: agent={agent_role}, desc={t.description[:50]}")
+
+            # Build reverse lookup: Agent object -> agent_id
+            agent_obj_to_id = {}
+            for aid, agent_obj in components["agents"].items():
+                agent_obj_to_id[id(agent_obj)] = aid
+
+            def _resolve_agent_id(agent_ref):
+                """Resolve an agent reference from a callback to our agent_id."""
+                if agent_ref is None:
+                    return self._agent_ids[0] if self._agent_ids else ""
+                # Try object identity first
+                obj_id = id(agent_ref)
+                if obj_id in agent_obj_to_id:
+                    return agent_obj_to_id[obj_id]
+                # Try role string match
+                role_name = getattr(agent_ref, 'role', str(agent_ref))
+                if role_name in self._role_to_id:
+                    return self._role_to_id[role_name]
+                # Try partial match
+                for role, aid in self._role_to_id.items():
+                    if role.lower() in role_name.lower() or role_name.lower() in role.lower():
+                        return aid
+                logger.info(f"Could not resolve agent: role={role_name}")
+                return self._agent_ids[0] if self._agent_ids else ""
 
             def step_callback(step_output):
-                agent_role = getattr(step_output, 'agent', None)
-                if agent_role:
-                    role_name = getattr(agent_role, 'role', str(agent_role))
-                    agent_id = self._role_to_id.get(role_name, self._agent_ids[0] if self._agent_ids else "")
-                else:
-                    agent_id = self._agent_ids[0] if self._agent_ids else ""
+                agent_ref = getattr(step_output, 'agent', None)
+                agent_id = _resolve_agent_id(agent_ref)
                 output_text = str(getattr(step_output, 'output', step_output))
                 if len(output_text) > 500:
                     output_text = output_text[:500] + "..."
@@ -937,12 +1038,8 @@ class CrewTUIApp(App):
                 self.post_message(AgentOutput(agent_id, f"[dim]Step:[/] {output_text}"))
 
             def task_callback(task_output):
-                agent_role = getattr(task_output, 'agent', None)
-                if agent_role:
-                    role_name = getattr(agent_role, 'role', str(agent_role))
-                    agent_id = self._role_to_id.get(role_name, self._agent_ids[0] if self._agent_ids else "")
-                else:
-                    agent_id = self._agent_ids[0] if self._agent_ids else ""
+                agent_ref = getattr(task_output, 'agent', None)
+                agent_id = _resolve_agent_id(agent_ref)
                 output_text = str(getattr(task_output, 'raw', getattr(task_output, 'output', task_output)))
                 if len(output_text) > 2000:
                     output_text = output_text[:2000] + "\n[dim]... (truncated)[/]"
@@ -951,7 +1048,9 @@ class CrewTUIApp(App):
 
             crew.step_callback = step_callback
             crew.task_callback = task_callback
+            logger.info("Crew kickoff starting...")
             crew.kickoff()
+            logger.info("Crew kickoff completed")
 
             duration = int((datetime.now() - start_time).total_seconds())
             save_history({
@@ -974,14 +1073,19 @@ class CrewTUIApp(App):
             ))
 
         except Exception as e:
+            logger.error(f"Crew failed: {e}", exc_info=True)
+            self.crew_running = False
             duration = int((datetime.now() - start_time).total_seconds())
-            save_history({
-                "timestamp": start_time.strftime("%Y-%m-%d %H:%M"),
-                "mission": mission or "default crew",
-                "success": False,
-                "duration": duration,
-                "error": str(e)[:200],
-            })
+            try:
+                save_history({
+                    "timestamp": start_time.strftime("%Y-%m-%d %H:%M"),
+                    "mission": mission or "default crew",
+                    "success": False,
+                    "duration": duration,
+                    "error": str(e)[:200],
+                })
+            except Exception:
+                pass
             self.post_message(CrewFinished(success=False, error=str(e), mission=mission or "default", duration=duration))
 
     # === Input handling ===
@@ -1525,6 +1629,38 @@ class CrewTUIApp(App):
 
         elif cmd == "/copy":
             self.action_copy_panel()
+
+        elif cmd == "/delete":
+            out_dir = _output_dir()
+            arg = parts[1] if len(parts) > 1 else ""
+            panel = self.query_one(f"#panel-{self.current_agent}", AgentPanel)
+            if not arg:
+                panel.write("[dim]Usage: /delete <filename> or /delete all[/]")
+                return
+            if arg.lower() == "all":
+                if os.path.exists(out_dir):
+                    count = 0
+                    for f in os.listdir(out_dir):
+                        os.remove(os.path.join(out_dir, f))
+                        count += 1
+                    panel.write(f"[yellow]Deleted {count} files from output.[/]")
+                else:
+                    panel.write("[dim]No output directory.[/]")
+            else:
+                filepath = os.path.join(out_dir, arg)
+                if not os.path.exists(filepath):
+                    # Try partial match
+                    matches = [f for f in os.listdir(out_dir) if arg.lower() in f.lower()] if os.path.exists(out_dir) else []
+                    if len(matches) == 1:
+                        filepath = os.path.join(out_dir, matches[0])
+                    elif len(matches) > 1:
+                        panel.write(f"[yellow]Multiple matches:[/] {', '.join(matches)}")
+                        return
+                    else:
+                        panel.write(f"[red]File not found: {arg}[/]")
+                        return
+                os.remove(filepath)
+                panel.write(f"[yellow]Deleted {os.path.basename(filepath)}[/]")
 
         elif cmd == "/status":
             panel = self.query_one(f"#panel-{self.current_agent}", AgentPanel)
