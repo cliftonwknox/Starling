@@ -18,9 +18,10 @@ Define your own AI agents, assign models and tools, and run them from a rich ter
 ## Install
 
 ```bash
-git clone https://github.com/youruser/crewtui.git
+git clone https://github.com/cliftonwknox/crewtui.git
 cd crewtui
 uv sync
+uv pip install -e .
 ```
 
 ## Setup
