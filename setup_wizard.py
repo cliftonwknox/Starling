@@ -376,6 +376,31 @@ def _setup_routing(agents: list) -> dict:
     }
 
 
+def _detect_terminal() -> str:
+    """Detect the user's terminal emulator."""
+    import shutil
+    # Check environment variable first
+    for env_var in ("TERMINAL", "TERM_PROGRAM"):
+        term = os.environ.get(env_var)
+        if term and shutil.which(term):
+            return term
+    # Try common terminals in preference order
+    for term in [
+        "x-terminal-emulator",  # Debian/Ubuntu default
+        "gnome-terminal",
+        "konsole",
+        "xfce4-terminal",
+        "mate-terminal",
+        "kitty",
+        "alacritty",
+        "wezterm",
+        "xterm",
+    ]:
+        if shutil.which(term):
+            return term
+    return ""
+
+
 def _generate_desktop_shortcut(project_name: str):
     """Generate a .desktop file for the app menu."""
     desktop_dir = os.path.expanduser("~/.local/share/applications")
@@ -392,12 +417,19 @@ def _generate_desktop_shortcut(project_name: str):
         import shutil
         shutil.copy2(bundled_icon, icon_path)
 
+    # Detect terminal emulator
+    terminal = _detect_terminal()
+    if terminal:
+        exec_line = f'{terminal} -e "cd {project_dir} && uv run crewtui"'
+    else:
+        exec_line = f'cd {project_dir} && uv run crewtui'
+
     content = f"""[Desktop Entry]
 Name={project_name} (CrewTUI)
 Comment=Launch {project_name} Agent Command Center
-Exec=gnome-terminal -- bash -c "cd {project_dir} && uv run python tui.py; exec bash"
+Exec={exec_line}
 Icon={icon_path if os.path.exists(icon_path) else 'utilities-terminal'}
-Terminal=false
+Terminal={'true' if not terminal else 'false'}
 Type=Application
 Categories=Development;Utility;
 Keywords=crewai;crewtui;agents;

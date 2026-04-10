@@ -6,7 +6,6 @@ import urllib.request
 import urllib.parse
 
 CONFIG_DIR = os.path.dirname(__file__)
-NOTIFY_CONFIG_FILE = os.path.join(CONFIG_DIR, "telegram_config.json")
 
 DEFAULT_CONFIG = {
     "enabled": False,
@@ -22,16 +21,27 @@ DEFAULT_CONFIG = {
 }
 
 
+def _config_file() -> str:
+    """Find telegram_config.json — prefer work dir, fall back to source dir."""
+    try:
+        from config_loader import get_data_file
+        return get_data_file("telegram_config.json")
+    except Exception:
+        return os.path.join(CONFIG_DIR, "telegram_config.json")
+
+
 def load_config() -> dict:
-    if os.path.exists(NOTIFY_CONFIG_FILE):
-        with open(NOTIFY_CONFIG_FILE) as f:
+    config_file = _config_file()
+    if os.path.exists(config_file):
+        with open(config_file) as f:
             saved = json.load(f)
         return {**DEFAULT_CONFIG, **saved}
     return {**DEFAULT_CONFIG}
 
 
 def save_config(config: dict):
-    with open(NOTIFY_CONFIG_FILE, "w") as f:
+    config_file = _config_file()
+    with open(config_file, "w") as f:
         json.dump(config, f, indent=2)
 
 

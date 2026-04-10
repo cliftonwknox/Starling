@@ -101,9 +101,29 @@ def save_custom_presets(presets):
         json.dump(custom, f, indent=2)
 
 
+def _env_file():
+    """Find .env file — prefer work dir, fall back to source dir."""
+    try:
+        from config_loader import load_project_config
+        config = load_project_config()
+        work_dir = config.get("project", {}).get("work_dir")
+        if work_dir:
+            work_env = os.path.join(work_dir, ".env")
+            if os.path.exists(work_env):
+                return work_env
+            # New installs: use work dir
+            source_env = os.path.join(CONFIG_DIR, ".env")
+            if not os.path.exists(source_env):
+                return work_env
+            return source_env
+    except Exception:
+        pass
+    return os.path.join(CONFIG_DIR, ".env")
+
+
 def load_env():
     """Load .env file as dict."""
-    env_file = os.path.join(CONFIG_DIR, ".env")
+    env_file = _env_file()
     env = {}
     if os.path.exists(env_file):
         with open(env_file) as f:
@@ -117,7 +137,7 @@ def load_env():
 
 def save_env(env):
     """Write env dict back to .env file."""
-    env_file = os.path.join(CONFIG_DIR, ".env")
+    env_file = _env_file()
     with open(env_file, "w") as f:
         for key, val in env.items():
             f.write(f"{key}={val}\n")
@@ -370,7 +390,7 @@ def cmd_test():
     print(f"\n  Testing {p['label']} at {p['base_url']}...")
 
     from dotenv import load_dotenv
-    load_dotenv(os.path.join(CONFIG_DIR, ".env"))
+    load_dotenv(_env_file())
 
     try:
         import litellm

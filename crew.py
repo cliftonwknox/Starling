@@ -361,7 +361,11 @@ def build_agents_from_config(project_config: dict, presets: dict) -> dict:
     Returns {"agents": {id: Agent}, "llms": {id: LLM}}
     """
     from dotenv import load_dotenv
-    load_dotenv()
+    try:
+        from model_wizard import _env_file
+        load_dotenv(_env_file())
+    except Exception:
+        load_dotenv()
 
     agents_cfg = project_config.get("agents", [])
     if len(agents_cfg) > project_config.get("max_agents", 10):
@@ -556,7 +560,11 @@ if __name__ == "__main__":
         raise SystemExit(1)
 
     from dotenv import load_dotenv
-    load_dotenv()
+    try:
+        from model_wizard import _env_file
+        load_dotenv(_env_file())
+    except Exception:
+        load_dotenv()
 
     config = load_project_config()
     presets = load_presets()

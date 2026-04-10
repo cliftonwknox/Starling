@@ -190,7 +190,12 @@ def _build_report_context(out_dir: str, max_reports: int = 3, max_chars: int = 3
 def _run_daemon():
     """Main daemon loop — heartbeat + Telegram listener."""
     from dotenv import load_dotenv
-    load_dotenv(os.path.join(BASE_DIR, ".env"))
+    # Load .env from work dir first, then source dir as fallback
+    try:
+        from model_wizard import _env_file
+        load_dotenv(_env_file())
+    except Exception:
+        load_dotenv(os.path.join(BASE_DIR, ".env"))
 
     from config_loader import load_project_config
     from model_wizard import load_presets
