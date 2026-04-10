@@ -154,7 +154,8 @@ def run_setup():
     print(f"  Project: {project_name}")
     print(f"  Agents:  {len(agents)}")
     print(f"  Work dir: {work_dir}")
-    print(f"\n  Run 'crewtui' to launch the TUI.\n")
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    print(f"\n  To launch:  cd {project_dir} && uv run crewtui\n")
 
 
 SKILL_PACKS = {
