@@ -9,15 +9,91 @@ PRESETS_FILE = os.path.join(CONFIG_DIR, "model_presets.json")
 
 # Built-in presets that ship with the app
 BUILTIN_PRESETS = {
-    "haiku": {
-        "label": "Claude Haiku 4.5",
-        "model": "openrouter/anthropic/claude-haiku-4.5",
+    # --- OpenAI ---
+    "gpt-4o": {
+        "label": "GPT-4o",
+        "model": "openai/gpt-4o",
+        "base_url": "https://api.openai.com/v1",
+        "api_format": "openai",
+        "api_key_env": "OPENAI_API_KEY",
+        "provider": "OpenAI",
+        "extra": {},
+    },
+    "gpt-4o-mini": {
+        "label": "GPT-4o Mini",
+        "model": "openai/gpt-4o-mini",
+        "base_url": "https://api.openai.com/v1",
+        "api_format": "openai",
+        "api_key_env": "OPENAI_API_KEY",
+        "provider": "OpenAI",
+        "extra": {},
+    },
+    "o1": {
+        "label": "OpenAI o1",
+        "model": "openai/o1",
+        "base_url": "https://api.openai.com/v1",
+        "api_format": "openai",
+        "api_key_env": "OPENAI_API_KEY",
+        "provider": "OpenAI",
+        "extra": {},
+    },
+    # --- Anthropic (direct) ---
+    "claude-sonnet": {
+        "label": "Claude Sonnet 4",
+        "model": "anthropic/claude-sonnet-4-20250514",
+        "base_url": "https://api.anthropic.com/v1",
+        "api_format": "anthropic",
+        "api_key_env": "ANTHROPIC_API_KEY",
+        "provider": "Anthropic",
+        "extra": {},
+    },
+    "claude-haiku": {
+        "label": "Claude Haiku 3.5",
+        "model": "anthropic/claude-3-5-haiku-20241022",
+        "base_url": "https://api.anthropic.com/v1",
+        "api_format": "anthropic",
+        "api_key_env": "ANTHROPIC_API_KEY",
+        "provider": "Anthropic",
+        "extra": {},
+    },
+    "claude-opus": {
+        "label": "Claude Opus 4",
+        "model": "anthropic/claude-opus-4-20250514",
+        "base_url": "https://api.anthropic.com/v1",
+        "api_format": "anthropic",
+        "api_key_env": "ANTHROPIC_API_KEY",
+        "provider": "Anthropic",
+        "extra": {},
+    },
+    # --- OpenRouter (one key, many models) ---
+    "openrouter-claude": {
+        "label": "Claude Sonnet via OpenRouter",
+        "model": "openrouter/anthropic/claude-sonnet-4",
         "base_url": "https://openrouter.ai/api/v1",
         "api_format": "openai",
         "api_key_env": "OPENROUTER_API_KEY",
         "provider": "OpenRouter",
         "extra": {},
     },
+    "openrouter-gpt4o": {
+        "label": "GPT-4o via OpenRouter",
+        "model": "openrouter/openai/gpt-4o",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_format": "openai",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "provider": "OpenRouter",
+        "extra": {},
+    },
+    "openrouter-llama": {
+        "label": "Llama 3.3 70B via OpenRouter",
+        "model": "openrouter/meta-llama/llama-3.3-70b-instruct",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_format": "openai",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "provider": "OpenRouter",
+        "extra": {},
+    },
+    # --- xAI ---
     "grok": {
         "label": "Grok 4.1 Fast",
         "model": "openai/grok-4-1-fast",
@@ -36,6 +112,56 @@ BUILTIN_PRESETS = {
         "provider": "xAI",
         "extra": {"additional_drop_params": ["stop"]},
     },
+    # --- DeepSeek ---
+    "deepseek": {
+        "label": "DeepSeek V3",
+        "model": "openai/deepseek-chat",
+        "base_url": "https://api.deepseek.com/v1",
+        "api_format": "openai",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "provider": "DeepSeek",
+        "extra": {},
+    },
+    "deepseek-reasoning": {
+        "label": "DeepSeek R1 Reasoning",
+        "model": "openai/deepseek-reasoner",
+        "base_url": "https://api.deepseek.com/v1",
+        "api_format": "openai",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "provider": "DeepSeek",
+        "extra": {},
+    },
+    # --- Mistral ---
+    "mistral": {
+        "label": "Mistral Large",
+        "model": "openai/mistral-large-latest",
+        "base_url": "https://api.mistral.ai/v1",
+        "api_format": "openai",
+        "api_key_env": "MISTRAL_API_KEY",
+        "provider": "Mistral",
+        "extra": {},
+    },
+    # --- Groq (fast inference) ---
+    "groq-llama": {
+        "label": "Llama 3.3 70B on Groq",
+        "model": "openai/llama-3.3-70b-versatile",
+        "base_url": "https://api.groq.com/openai/v1",
+        "api_format": "openai",
+        "api_key_env": "GROQ_API_KEY",
+        "provider": "Groq",
+        "extra": {},
+    },
+    # --- Together ---
+    "together-llama": {
+        "label": "Llama 3.3 70B on Together",
+        "model": "openai/meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "base_url": "https://api.together.xyz/v1",
+        "api_format": "openai",
+        "api_key_env": "TOGETHER_API_KEY",
+        "provider": "Together",
+        "extra": {},
+    },
+    # --- NVIDIA ---
     "kimi": {
         "label": "Kimi K2.5",
         "model": "openai/moonshotai/kimi-k2.5",
@@ -45,15 +171,7 @@ BUILTIN_PRESETS = {
         "provider": "NVIDIA",
         "extra": {},
     },
-    "local": {
-        "label": "Local Model (LM Studio/Ollama)",
-        "model": "openai/local-model",
-        "base_url": "http://127.0.0.1:1234/v1",
-        "api_format": "openai",
-        "api_key_env": None,
-        "provider": "Local",
-        "extra": {},
-    },
+    # --- Alibaba ---
     "qwen-plus": {
         "label": "Qwen 3.6 Plus",
         "model": "openai/qwen3.6-plus-2026-04-02",
@@ -63,6 +181,7 @@ BUILTIN_PRESETS = {
         "provider": "Alibaba",
         "extra": {},
     },
+    # --- Google ---
     "gemini": {
         "label": "Gemini 3 Flash",
         "model": "openai/gemini-3-flash-preview",
@@ -70,6 +189,25 @@ BUILTIN_PRESETS = {
         "api_format": "openai",
         "api_key_env": "GOOGLE_API_KEY",
         "provider": "Google",
+        "extra": {},
+    },
+    # --- Local ---
+    "lm-studio": {
+        "label": "LM Studio (local)",
+        "model": "openai/local-model",
+        "base_url": "http://127.0.0.1:1234/v1",
+        "api_format": "openai",
+        "api_key_env": None,
+        "provider": "LM Studio",
+        "extra": {},
+    },
+    "ollama": {
+        "label": "Ollama (local)",
+        "model": "openai/llama3.2",
+        "base_url": "http://127.0.0.1:11434/v1",
+        "api_format": "openai",
+        "api_key_env": None,
+        "provider": "Ollama",
         "extra": {},
     },
 }

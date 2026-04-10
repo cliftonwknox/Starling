@@ -553,10 +553,17 @@ class CrewTUIApp(App):
                         yield Input(placeholder="e.g., openai/deepseek-chat", id="model-id-input")
                         yield Static("Base URL")
                         yield Input(placeholder="e.g., https://api.deepseek.com/v1", id="model-url-input")
-                        yield Static("API Key Env Var")
-                        yield Input(placeholder="e.g., DEEPSEEK_API_KEY (blank for local)", id="model-key-input")
-                        yield Static("Provider")
+                        yield Static("API Key Env Var [dim](blank for local models)[/]")
+                        yield Input(placeholder="e.g., DEEPSEEK_API_KEY", id="model-key-input")
+                        yield Static("Provider Name")
                         yield Input(placeholder="e.g., DeepSeek, Local, xAI", id="model-provider-input")
+                        yield Static("API Compatibility")
+                        yield Select(
+                            [("OpenAI Compatible (most providers)", "openai"),
+                             ("Anthropic (Claude direct API)", "anthropic")],
+                            value="openai",
+                            id="model-format-select",
+                        )
                         yield Horizontal(
                             Button("Test", id="model-test-btn", variant="default"),
                             Button("Save", id="model-save-btn", variant="success"),
@@ -1034,6 +1041,7 @@ class CrewTUIApp(App):
                     self.query_one("#model-url-input", Input).value = p.get("base_url", "")
                     self.query_one("#model-key-input", Input).value = p.get("api_key_env", "") or ""
                     self.query_one("#model-provider-input", Input).value = p.get("provider", "")
+                    self.query_one("#model-format-select", Select).value = p.get("api_format", "openai")
                 return
         except Exception:
             pass
@@ -1072,6 +1080,7 @@ class CrewTUIApp(App):
                     self.query_one("#model-url-input", Input).value = p.get("base_url", "")
                     self.query_one("#model-key-input", Input).value = p.get("api_key_env", "") or ""
                     self.query_one("#model-provider-input", Input).value = p.get("provider", "")
+                    self.query_one("#model-format-select", Select).value = p.get("api_format", "openai")
                 except Exception:
                     pass
 
@@ -1094,6 +1103,11 @@ class CrewTUIApp(App):
 
     def _get_model_form(self) -> dict:
         """Read current values from the model form."""
+        try:
+            fmt_select = self.query_one("#model-format-select", Select)
+            api_format = str(fmt_select.value) if fmt_select.value != Select.BLANK else "openai"
+        except Exception:
+            api_format = "openai"
         return {
             "name": self.query_one("#model-name-input", Input).value.strip(),
             "label": self.query_one("#model-label-input", Input).value.strip(),
@@ -1101,6 +1115,7 @@ class CrewTUIApp(App):
             "base_url": self.query_one("#model-url-input", Input).value.strip(),
             "api_key_env": self.query_one("#model-key-input", Input).value.strip() or None,
             "provider": self.query_one("#model-provider-input", Input).value.strip(),
+            "api_format": api_format,
         }
 
     def _test_model_preset(self):
@@ -1249,7 +1264,7 @@ class CrewTUIApp(App):
             "label": form["label"] or form["name"],
             "model": form["model"],
             "base_url": form["base_url"],
-            "api_format": "openai",
+            "api_format": form.get("api_format", "openai"),
             "api_key_env": form["api_key_env"],
             "provider": form["provider"] or "Custom",
             "extra": {},
