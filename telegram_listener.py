@@ -130,23 +130,12 @@ class TelegramListener:
         return "No command handler configured."
 
     def _reply(self, text: str):
-        """Send a reply to the configured chat."""
+        """Send a reply to the configured chat (uses split-message logic)."""
         if not text:
             return
-        # Truncate long messages
-        if len(text) > 4000:
-            text = text[:3950] + "\n\n_(truncated)_"
-
-        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-        data = urllib.parse.urlencode({
-            "chat_id": self.chat_id,
-            "text": text,
-            "parse_mode": "Markdown",
-        }).encode("utf-8")
-
         try:
-            req = urllib.request.Request(url, data=data)
-            urllib.request.urlopen(req, timeout=10)
+            import telegram_notify as tg
+            tg.send_message(text)
         except Exception as e:
             logger.error(f"Telegram reply error: {e}")
 

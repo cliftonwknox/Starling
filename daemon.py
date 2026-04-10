@@ -105,12 +105,21 @@ def stop():
     try:
         os.kill(pid, signal.SIGTERM)
         # Wait for it to stop
-        for _ in range(10):
+        stopped = False
+        for _ in range(6):
             try:
                 os.kill(pid, 0)
                 time.sleep(0.5)
             except OSError:
+                stopped = True
                 break
+        # Force kill if SIGTERM didn't work
+        if not stopped:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                time.sleep(0.5)
+            except OSError:
+                pass
         print(f"Daemon stopped (PID {pid})")
     except OSError:
         print("Daemon was not running (stale PID).")
@@ -232,14 +241,15 @@ def _run_daemon():
 
     def on_task_done(task, result):
         logger.info(f"Done: {task['description'][:40]}")
-        # Send to Telegram
+        # Send full result to Telegram (split-message handles length)
         try:
             import telegram_notify as tg
+            result_str = str(result) if result else "No output"
             tg.send_message(
                 f"*{project_name} Task Complete*\n\n"
                 f"*Task:* {task['description'][:100]}\n"
-                f"*Agent:* {task.get('agent', '?')}\n"
-                f"*Result:* {str(result)[:200] if result else 'No output'}"
+                f"*Agent:* {task.get('agent', '?')}\n\n"
+                f"{result_str}"
             )
         except Exception:
             pass

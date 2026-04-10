@@ -78,12 +78,9 @@ def launch_tui():
         app = CrewTUIApp()
         result = app.run()
         if app.return_code == 42:
-            # Restart requested
+            # Restart requested — exec a fresh process so all code reloads
             print("Restarting CrewTUI...")
-            # Clear cached config
-            from config_loader import load_project_config
-            load_project_config(force_reload=True)
-            continue
+            os.execv(sys.executable, [sys.executable] + sys.argv)
         break
 
 

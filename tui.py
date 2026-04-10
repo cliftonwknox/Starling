@@ -482,6 +482,8 @@ class CrewTUIApp(App):
         # Status tab — refresh every 2 seconds for live updates
         self._update_status_tab()
         self.set_interval(3, self._update_status_tab, name="status-refresh")
+        self.set_interval(5, self._load_queue_view, name="queue-refresh")
+        self.set_interval(5, self._refresh_file_tree, name="files-refresh")
 
     def _start_telegram_listener(self):
         """Start Telegram listener if bot is configured."""
@@ -1935,6 +1937,20 @@ class CrewTUIApp(App):
                 os.remove(filepath)
                 panel.write(f"[yellow]Deleted {os.path.basename(filepath)}[/]")
                 self._refresh_file_tree()
+
+        elif cmd == "/purge":
+            out_dir = _output_dir()
+            panel = self.query_one(f"#panel-{self.current_agent}", AgentPanel)
+            if os.path.exists(out_dir):
+                count = sum(1 for f in os.listdir(out_dir) if os.path.isfile(os.path.join(out_dir, f)))
+                for f in os.listdir(out_dir):
+                    fp = os.path.join(out_dir, f)
+                    if os.path.isfile(fp):
+                        os.remove(fp)
+                panel.write(f"[yellow]Purged {count} files.[/]")
+                self._refresh_file_tree()
+            else:
+                panel.write("[dim]No output directory.[/]")
 
         elif cmd == "/status":
             panel = self.query_one(f"#panel-{self.current_agent}", AgentPanel)
