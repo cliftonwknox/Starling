@@ -269,9 +269,9 @@ def _check_api_keys(agents: list, presets: dict):
     for env_var, info in needed.items():
         existing = os.environ.get(env_var)
         if existing:
-            print(f"  {env_var:25s} -> {info['provider']:15s} [green]set[/] (used by: {', '.join(info['agents'])})")
+            print(f"  {env_var:25s} -> {info['provider']:15s} SET (used by: {', '.join(info['agents'])})")
         else:
-            print(f"  {env_var:25s} -> {info['provider']:15s} [red]MISSING[/] (used by: {', '.join(info['agents'])})")
+            print(f"  {env_var:25s} -> {info['provider']:15s} MISSING (used by: {', '.join(info['agents'])})")
             key = _prompt(f"Enter {env_var} (blank to skip)")
             if key:
                 env_updates[env_var] = key

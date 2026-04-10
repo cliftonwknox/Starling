@@ -109,13 +109,24 @@ def get_episodic(agent_id: str, limit: int = 20, tags: Optional[list] = None,
         entries = [e for e in entries if e.get("state") == "active"]
     if tags:
         entries = [e for e in entries if any(t in e.get("tags", []) for t in tags)]
-    # Mark as accessed
+    # Mark as accessed and save back
     now = datetime.now().isoformat()
-    for e in entries[-limit:]:
-        e["access_count"] = e.get("access_count", 0) + 1
-        e["last_accessed"] = now
-    _save_json(_episodic_path(agent_id), _load_json(_episodic_path(agent_id)))
-    return entries[-limit:]
+    result = entries[-limit:]
+    if result:
+        # Update access counts on the returned entries
+        accessed_ids = set()
+        for e in result:
+            e["access_count"] = e.get("access_count", 0) + 1
+            e["last_accessed"] = now
+            accessed_ids.add(id(e))
+        # Save the full list (entries may be filtered, so reload and update)
+        all_entries = _load_json(_episodic_path(agent_id))
+        for e in all_entries:
+            if e.get("content") in {r.get("content") for r in result}:
+                e["access_count"] = e.get("access_count", 0) + 1
+                e["last_accessed"] = now
+        _save_json(_episodic_path(agent_id), all_entries)
+    return result
 
 
 # === Semantic memory (long-term, promoted) ===

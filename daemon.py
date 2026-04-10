@@ -231,6 +231,9 @@ def _run_daemon():
         if not agent:
             raise ValueError(f"Unknown agent: {agent_id}")
 
+        out_dir = get_output_dir()
+        os.makedirs(out_dir, exist_ok=True)
+
         memory_context = mem.get_agent_context(agent_id)
         memory_section = f"\nAgent memory context:\n{memory_context}" if memory_context else ""
 
@@ -242,9 +245,6 @@ def _run_daemon():
             expected_output="A thorough report with findings and recommendations.",
             agent=agent,
         )
-
-        out_dir = get_output_dir()
-        os.makedirs(out_dir, exist_ok=True)
         original_cwd = os.getcwd()
         os.chdir(out_dir)
         try:

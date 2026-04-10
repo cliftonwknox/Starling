@@ -329,9 +329,10 @@ def cmd_enable():
 
 def cmd_remove():
     """Remove Telegram config entirely."""
-    if os.path.exists(NOTIFY_CONFIG_FILE):
-        os.remove(NOTIFY_CONFIG_FILE)
-        print("\n  ✓ Telegram config removed. Will use defaults next time.")
+    config_file = _config_file()
+    if os.path.exists(config_file):
+        os.remove(config_file)
+        print("\n  Telegram config removed. Will use defaults next time.")
     else:
         print("\n  No config file to remove.")
 

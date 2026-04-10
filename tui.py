@@ -1012,34 +1012,38 @@ class CrewTUIApp(App):
         return self._heartbeat
 
     def _run_heartbeat_task(self, task):
+        """Execute a single-agent task using CrewAI (with tools)."""
+        from crewai import Crew, Task as CrewTask
         import agent_memory as mem
         components = self._ensure_components()
         agent_id = task.get("agent", self._agent_ids[0] if self._agent_ids else "")
         agent = components["agents"].get(agent_id)
-        llm = components["llms"].get(agent_id)
 
-        if not agent or not llm:
+        if not agent:
             raise ValueError(f"Unknown agent: {agent_id}")
 
         memory_context = mem.get_agent_context(agent_id)
-        memory_section = f"\n\n## Your Memory\n{memory_context}" if memory_context else ""
-
-        system_prompt = (
-            f"You are {agent.role}. {agent.backstory} "
-            f"Complete the following task thoroughly and provide actionable results."
-            f"{memory_section}"
-        )
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": task["description"]},
-        ]
+        memory_section = f"\nAgent memory context:\n{memory_context}" if memory_context else ""
 
         self.post_message(AgentOutput(agent_id, f"[bold yellow]Heartbeat task:[/] {task['description']}"))
 
-        response = llm.call(messages=messages)
-        response_text = str(response) if response else "No response"
+        crew_task = CrewTask(
+            description=f"{task['description']}{memory_section}",
+            expected_output="A thorough report with findings and recommendations.",
+            agent=agent,
+        )
 
+        out_dir = _output_dir()
+        os.makedirs(out_dir, exist_ok=True)
+        original_cwd = os.getcwd()
+        os.chdir(out_dir)
+        try:
+            crew = Crew(agents=[agent], tasks=[crew_task], verbose=True)
+            result = crew.kickoff()
+        finally:
+            os.chdir(original_cwd)
+
+        response_text = str(result) if result else "No response"
         display_text = response_text[:2000] + "\n[dim]... (truncated)[/]" if len(response_text) > 2000 else response_text
         self.post_message(AgentOutput(agent_id, f"[bold green]Result:[/]\n{display_text}"))
 
@@ -1967,12 +1971,13 @@ class CrewTUIApp(App):
                 self._load_queue_view()
 
             elif sub == "priority" or sub == "pri":
-                if len(parts) < 4:
+                pri_parts = command.split()
+                if len(pri_parts) < 4:
                     self.notify("Usage: /queue priority <id> <1-9>", severity="warning")
                     return
-                tid_suffix = parts[2]
+                tid_suffix = pri_parts[2]
                 try:
-                    pri = int(parts[3])
+                    pri = int(pri_parts[3])
                 except ValueError:
                     self.notify("Priority must be a number 1-9", severity="warning")
                     return
@@ -2181,7 +2186,7 @@ class CrewTUIApp(App):
                 self._cron_wizard = {"step": 1, "data": {}}
                 panel.write("[bold cyan]━━━ Cron Job Wizard ━━━[/]")
                 panel.write("[dim]Type 'cancel' at any step to abort.[/]\n")
-                panel.write("[bold]Step 1/5:[/] What should this job be called?")
+                panel.write("[bold]Step 1/6:[/] What should this job be called?")
                 panel.write("[dim]  e.g., Market Report, Daily SEO Check[/]")
 
             elif sub == "list":
