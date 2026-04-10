@@ -303,15 +303,73 @@ def _pick_tools_custom(available_tools: dict) -> list:
 
 
 def _check_preset_key(preset_name: str, presets: dict):
-    """Check if the selected preset needs an API key and prompt if missing."""
+    """Check if the selected preset needs an API key or local config and prompt."""
     from dotenv import load_dotenv
     source_env = os.path.join(os.path.dirname(__file__), ".env")
     load_dotenv(source_env, override=False)
 
     preset = presets.get(preset_name, {})
     env_var = preset.get("api_key_env")
+
+    # Local model — ask for model name and port
     if not env_var:
-        return  # local model, no key needed
+        provider = preset.get("provider", "").lower()
+        if provider not in ("lm studio", "ollama"):
+            return
+
+        base_url = preset.get("base_url", "")
+        default_port = "1234" if "lm studio" in provider else "11434"
+        label = "LM Studio" if "lm studio" in provider else "Ollama"
+
+        print(f"\n  {label} Local Model Configuration")
+        print(f"  Current base URL: {base_url}")
+
+        # Port
+        port = _prompt(f"{label} port", default_port)
+        if port != default_port:
+            if "lm studio" in provider:
+                preset["base_url"] = f"http://127.0.0.1:{port}/v1"
+            else:
+                preset["base_url"] = f"http://127.0.0.1:{port}"
+            print(f"  Base URL set to: {preset['base_url']}")
+
+        # Model name
+        current_model = preset.get("model", "")
+        print(f"\n  Which model is loaded in {label}?")
+        if "lm studio" in provider:
+            print(f"  Check LM Studio > Developer tab for the model identifier.")
+            print(f"  Example: bartowski/qwen3.5-35b-a3b, lmstudio-community/Meta-Llama-3.1-8B")
+        else:
+            print(f"  Run 'ollama list' to see available models.")
+            print(f"  Example: llama3.1, mistral, codellama")
+        model_name = _prompt("Model name/ID", current_model)
+        if model_name and model_name != current_model:
+            # Ensure openai/ prefix for LM Studio
+            if "lm studio" in provider and not model_name.startswith("openai/"):
+                preset["model"] = f"openai/{model_name}"
+            else:
+                preset["model"] = model_name
+            print(f"  Model set to: {preset['model']}")
+
+        # Test connection
+        if _prompt_yn(f"\n  Test {label} connection?", True):
+            try:
+                import litellm
+                litellm.drop_params = True
+                response = litellm.completion(
+                    model=preset["model"],
+                    messages=[{"role": "user", "content": "Say hello in one sentence."}],
+                    api_base=preset["base_url"],
+                    api_key="lm-studio",
+                    max_tokens=50,
+                    **preset.get("extra", {}),
+                )
+                reply = response.choices[0].message.content.strip()[:60]
+                print(f"  OK: {reply}")
+            except Exception as e:
+                print(f"  FAILED: {str(e)[:80]}")
+                print(f"  Make sure {label} is running with a model loaded.")
+        return
 
     existing = os.environ.get(env_var)
     if existing:
