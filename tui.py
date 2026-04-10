@@ -2618,8 +2618,11 @@ class CrewTUIApp(App):
                 matches = [t for t in tasks if t["id"].endswith(tid_suffix)]
                 if len(matches) == 1:
                     hb.cancel_task(matches[0]["id"])
-                    panel.write(f"[yellow]Cancelled task #{tid_suffix}[/]")
                     self._load_queue_view()
+                    try:
+                        self.query_one("#main-tabs", TabbedContent).active = "tab-queue"
+                    except Exception:
+                        pass
                     self.notify(f"Task #{tid_suffix} cancelled", severity="information")
                 elif len(matches) > 1:
                     panel.write(f"[yellow]Multiple matches for #{tid_suffix}. Be more specific.[/]")
@@ -2628,8 +2631,11 @@ class CrewTUIApp(App):
 
             elif sub == "clear":
                 removed = hb.clear_done()
-                panel.write(f"[green]Cleared {removed} done/failed/cancelled tasks.[/]")
                 self._load_queue_view()
+                try:
+                    self.query_one("#main-tabs", TabbedContent).active = "tab-queue"
+                except Exception:
+                    pass
                 self.notify(f"Cleared {removed} tasks", severity="information")
 
             elif sub == "remove":
@@ -2644,8 +2650,11 @@ class CrewTUIApp(App):
                         tasks_list = hb._load_queue()
                         tasks_list = [t for t in tasks_list if t["id"] != matches[0]["id"]]
                         hb._save_queue(tasks_list)
-                        panel.write(f"[yellow]Removed task #{tid}[/]")
                         self._load_queue_view()
+                        try:
+                            self.query_one("#main-tabs", TabbedContent).active = "tab-queue"
+                        except Exception:
+                            pass
                         self.notify(f"Task #{tid} removed", severity="information")
                     elif len(matches) > 1:
                         panel.write(f"[yellow]Multiple matches for #{tid} — be more specific[/]")
@@ -2802,8 +2811,11 @@ class CrewTUIApp(App):
                 self._project_config = config
                 self._agents_cfg = config["agents"]
                 self._reload_components()
-                panel.write(f"[yellow]Removed {tool_id} from {agent_id}[/]")
                 self._load_skills_view()
+                try:
+                    self.query_one("#main-tabs", TabbedContent).active = "tab-skills"
+                except Exception:
+                    pass
                 self.notify(f"Removed {tool_id} from {agent_id}", severity="information")
 
             elif sub == "new":
@@ -3079,8 +3091,11 @@ class CrewTUIApp(App):
                     for f in os.listdir(out_dir):
                         os.remove(os.path.join(out_dir, f))
                         count += 1
-                    panel.write(f"[yellow]Deleted {count} files from output.[/]")
                     self._refresh_file_list()
+                    try:
+                        self.query_one("#main-tabs", TabbedContent).active = "tab-files"
+                    except Exception:
+                        pass
                     self.notify(f"Deleted {count} files", severity="information")
                 else:
                     panel.write("[dim]No output directory.[/]")
@@ -3098,8 +3113,11 @@ class CrewTUIApp(App):
                         panel.write(f"[red]File not found: {arg}[/]")
                         return
                 os.remove(filepath)
-                panel.write(f"[yellow]Deleted {os.path.basename(filepath)}[/]")
                 self._refresh_file_list()
+                try:
+                    self.query_one("#main-tabs", TabbedContent).active = "tab-files"
+                except Exception:
+                    pass
                 self.notify(f"Deleted {os.path.basename(filepath)}", severity="information")
 
         elif cmd == "/view":
@@ -3144,8 +3162,11 @@ class CrewTUIApp(App):
                     fp = os.path.join(out_dir, f)
                     if os.path.isfile(fp):
                         os.remove(fp)
-                panel.write(f"[yellow]Purged {count} files.[/]")
                 self._refresh_file_list()
+                try:
+                    self.query_one("#main-tabs", TabbedContent).active = "tab-files"
+                except Exception:
+                    pass
                 self.notify(f"Purged {count} files", severity="information")
             else:
                 panel.write("[dim]No output directory.[/]")
