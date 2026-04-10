@@ -36,7 +36,7 @@ def save_config(config: dict):
 
 
 def send_message(text: str, parse_mode: str = "Markdown") -> bool:
-    """Send a message to the configured Telegram chat."""
+    """Send a message to the configured Telegram chat. Splits long messages."""
     config = load_config()
     if not config.get("enabled"):
         return False
@@ -46,10 +46,39 @@ def send_message(text: str, parse_mode: str = "Markdown") -> bool:
     if not bot_token or not chat_id:
         return False
 
-    max_len = config.get("max_message_length", 4000)
-    if len(text) > max_len:
-        text = text[:max_len - 20] + "\n\n_(truncated)_"
+    # Split long messages into chunks (Telegram limit is 4096)
+    chunk_size = 4000
+    if len(text) <= chunk_size:
+        return _send_single_message(bot_token, chat_id, text, parse_mode)
 
+    # Split on paragraph breaks to keep readability
+    chunks = []
+    current = ""
+    for line in text.split("\n"):
+        if len(current) + len(line) + 1 > chunk_size:
+            if current:
+                chunks.append(current)
+            current = line
+        else:
+            current = current + "\n" + line if current else line
+    if current:
+        chunks.append(current)
+
+    success = True
+    for i, chunk in enumerate(chunks):
+        if len(chunks) > 1:
+            header = f"_({i + 1}/{len(chunks)})_\n\n"
+            chunk = header + chunk
+        if not _send_single_message(bot_token, chat_id, chunk, parse_mode):
+            success = False
+        if i < len(chunks) - 1:
+            import time
+            time.sleep(0.5)  # rate limit between chunks
+    return success
+
+
+def _send_single_message(bot_token: str, chat_id: str, text: str, parse_mode: str = "Markdown") -> bool:
+    """Send a single message to Telegram."""
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     data = urllib.parse.urlencode({
         "chat_id": chat_id,

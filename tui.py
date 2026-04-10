@@ -352,6 +352,7 @@ class CrewTUIApp(App):
         self._crew_tasks = []  # list of {"desc": ..., "agent": ..., "done": bool}
         self._components = None
         self._heartbeat = None
+        self._telegram_listener = None
 
         # Load config
         from config_loader import config_exists, load_project_config
@@ -455,17 +456,51 @@ class CrewTUIApp(App):
         self._load_config_view()
         self._load_queue_view()
         self._load_skills_view()
-        self._update_status_tab()
 
-        # Auto-start heartbeat if configured
-        import heartbeat as hb
-        hb_config = hb.load_heartbeat_config()
-        if hb_config.get("auto_start"):
-            heartbeat = self._init_heartbeat()
-            heartbeat.interval = hb_config.get("interval", 60)
-            heartbeat.start()
-            self.notify("Heartbeat auto-started")
-            self._load_queue_view()
+        # Start daemon if not already running — it handles heartbeat + telegram
+        from daemon import is_running as daemon_is_running, start as daemon_start
+        if not daemon_is_running():
+            daemon_start()  # uses subprocess.Popen, returns immediately
+            if daemon_is_running():
+                self.notify("Daemon started")
+                logger.info("Daemon auto-started by TUI")
+            else:
+                logger.error("Daemon failed to start")
+                # Fallback: run services locally
+                import heartbeat as hb
+                hb_config = hb.load_heartbeat_config()
+                if hb_config.get("auto_start"):
+                    heartbeat = self._init_heartbeat()
+                    heartbeat.interval = hb_config.get("interval", 60)
+                    heartbeat.start()
+                    self.notify("Heartbeat started (local)")
+                self._start_telegram_listener()
+        else:
+            self.notify("Daemon running")
+            logger.info("Daemon already running")
+
+        # Status tab — refresh every 2 seconds for live updates
+        self._update_status_tab()
+        self.set_interval(3, self._update_status_tab, name="status-refresh")
+
+    def _start_telegram_listener(self):
+        """Start Telegram listener if bot is configured."""
+        try:
+            import telegram_notify as tg
+            config = tg.load_config()
+            if config.get("enabled") and config.get("bot_token") and config.get("chat_id"):
+                from telegram_listener import TelegramListener, create_command_handler
+                handler = create_command_handler(app=self)
+                self._telegram_listener = TelegramListener(
+                    bot_token=config["bot_token"],
+                    chat_id=config["chat_id"],
+                    on_command=handler,
+                )
+                self._telegram_listener.start()
+                logger.info("Telegram listener started")
+                self.notify("Telegram listener active")
+        except Exception as e:
+            logger.error(f"Telegram listener failed: {e}")
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         """Show/hide agent selector based on active tab."""
@@ -534,17 +569,8 @@ class CrewTUIApp(App):
                     status = "[dim]PENDING[/]"
                 log.write(f"  {indicator} {t['agent']:20s} {status}  [dim]{t['desc'][:50]}[/]")
 
-        elif self._heartbeat and self._heartbeat.running:
-            st = self._heartbeat.status()
-            log.write(f"[bold cyan]HEARTBEAT ACTIVE[/]\n")
-            log.write(f"  Interval: {st['interval']}s")
-            log.write(f"  Processed: {st['tasks_processed']}")
-            log.write(f"  Pending: {st['pending']}")
-            log.write(f"  Active: {st['active']}")
-            if st["started_at"]:
-                log.write(f"  Started: {st['started_at'][:19]}")
         else:
-            log.write("[dim]No crew running. No heartbeat active.[/]\n")
+            log.write("[dim]No crew running.[/]\n")
             log.write("")
             log.write("[bold]Agents:[/]")
             for a in self._agents_cfg:
@@ -552,6 +578,73 @@ class CrewTUIApp(App):
                 preset = a.get("preset", "?")
                 tools = len(a.get("tools", []))
                 log.write(f"  [{color}]{a['name']:20s}[/] [dim]{preset} | {tools} tools[/]")
+
+        # Always show service status
+        log.write("")
+        log.write("[bold]--- Services ---[/]")
+
+        # Daemon
+        from daemon import is_running as daemon_is_running
+        if daemon_is_running():
+            from daemon import _pid_file
+            try:
+                with open(_pid_file()) as f:
+                    pid = f.read().strip()
+                log.write(f"  [bold magenta]Daemon:[/]     [green]RUNNING[/] (PID {pid}) — heartbeat + telegram handled by daemon")
+            except Exception:
+                log.write(f"  [bold magenta]Daemon:[/]     [green]RUNNING[/]")
+        else:
+            log.write(f"  [bold magenta]Daemon:[/]     [dim]OFF[/]")
+
+        # Heartbeat
+        try:
+            import heartbeat as hb
+            if self._heartbeat and self._heartbeat.running:
+                st = self._heartbeat.status()
+                log.write(f"  [bold cyan]Heartbeat:[/]  [green]ACTIVE[/]  |  Interval: {st['interval']}s  |  Processed: {st['tasks_processed']}  |  Pending: {st['pending']}")
+            elif daemon_is_running():
+                log.write(f"  [bold cyan]Heartbeat:[/]  [green]via daemon[/]")
+            else:
+                log.write(f"  [bold cyan]Heartbeat:[/]  [dim]OFF[/]")
+        except Exception:
+            log.write(f"  [bold cyan]Heartbeat:[/]  [dim]OFF[/]")
+
+        # Telegram
+        tg_status = "[dim]OFF[/]"
+        tg_listener = "[dim]OFF[/]"
+        try:
+            import telegram_notify as tg
+            config = tg.load_config()
+            if config.get("enabled"):
+                tg_status = "[green]ON[/]"
+            if self._telegram_listener and self._telegram_listener.running:
+                tg_listener = "[green]LISTENING[/]"
+            elif daemon_is_running():
+                tg_listener = "[green]via daemon[/]"
+        except Exception:
+            pass
+        log.write(f"  [bold cyan]Telegram:[/]   Notify: {tg_status}  |  Listener: {tg_listener}")
+
+        # Show active heartbeat tasks
+        try:
+            import heartbeat as hb
+            running_tasks = hb.list_tasks("running")
+            pending_tasks = hb.list_tasks("pending")
+            if running_tasks or pending_tasks:
+                log.write("")
+                log.write("[bold]--- Heartbeat Queue ---[/]")
+                for t in running_tasks:
+                    agent = t.get("agent") or "auto"
+                    mode = "[magenta]CREW[/] " if t.get("crew") else ""
+                    log.write(f"  [bold yellow]>>[/] {mode}[bold yellow]RUNNING[/]  {agent:15s}  {t['description'][:50]}")
+                for t in pending_tasks[:5]:
+                    agent = t.get("agent") or "auto"
+                    mode = "[magenta]CREW[/] " if t.get("crew") else ""
+                    log.write(f"  [dim]..[/] {mode}[dim]PENDING[/]  {agent:15s}  {t['description'][:50]}")
+                if len(pending_tasks) > 5:
+                    log.write(f"  [dim]   ... and {len(pending_tasks) - 5} more pending[/]")
+        except Exception:
+            pass
 
     def _ensure_components(self):
         if self._components is None:
@@ -1051,7 +1144,6 @@ class CrewTUIApp(App):
         self._crew_start_time = datetime.now()
         label = mission[:50] + "..." if mission and len(mission) > 50 else (mission or "default tasks")
         self.notify(f"Starting crew: {label}")
-        self.set_interval(2, self._update_status_tab, name="activity-pulse")
         try:
             self.query_one("#main-tabs", TabbedContent).active = "tab-status"
         except Exception:
@@ -1701,6 +1793,38 @@ class CrewTUIApp(App):
             else:
                 panel.write("[dim]Usage: /skills [show|install|assign|unassign|new|refresh][/]")
 
+        elif cmd == "/daemon":
+            sub = parts[1].lower() if len(parts) > 1 else "status"
+            panel = self.query_one(f"#panel-{self.current_agent}", AgentPanel)
+            from daemon import is_running, start, stop
+
+            if sub in ("on", "start"):
+                if is_running():
+                    panel.write("[yellow]Daemon is already running.[/]")
+                else:
+                    start()  # uses subprocess, returns immediately
+                    if is_running():
+                        panel.write("[green]Daemon started. Heartbeat + Telegram running in background.[/]")
+                    else:
+                        panel.write("[red]Daemon failed to start. Check daemon log.[/]")
+            elif sub in ("off", "stop"):
+                if is_running():
+                    stop()
+                    panel.write("[yellow]Daemon stopped.[/]")
+                else:
+                    panel.write("[dim]Daemon is not running.[/]")
+            elif sub == "status":
+                if is_running():
+                    from daemon import _pid_file
+                    with open(_pid_file()) as f:
+                        pid = f.read().strip()
+                    panel.write(f"[green]Daemon is RUNNING[/] (PID {pid})")
+                else:
+                    panel.write("[dim]Daemon is not running.[/]")
+                panel.write("[dim]Use /daemon on to start, /daemon off to stop[/]")
+            else:
+                panel.write("[dim]Usage: /daemon [on|off|status][/]")
+
         elif cmd == "/telegram":
             import telegram_notify as tg
             sub = parts[1] if len(parts) > 1 else "show"
@@ -1708,7 +1832,8 @@ class CrewTUIApp(App):
             if sub == "show":
                 config = tg.load_config()
                 enabled = "[green]enabled[/]" if config.get("enabled") else "[red]disabled[/]"
-                panel.write(f"[bold]Telegram: {enabled}[/]")
+                listener = "[green]listening[/]" if self._telegram_listener and self._telegram_listener.running else "[dim]off[/]"
+                panel.write(f"[bold]Telegram: {enabled}[/]  |  Listener: {listener}")
                 panel.write(f"  Chat ID: {config.get('chat_id', 'not set')}")
                 for key, val in config.get("notify_on", {}).items():
                     s = "[green]on[/]" if val else "[red]off[/]"
@@ -1723,20 +1848,50 @@ class CrewTUIApp(App):
                 config["enabled"] = True
                 tg.save_config(config)
                 panel.write("[green]Telegram notifications enabled.[/]")
+                self._start_telegram_listener()
             elif sub == "off":
                 config = tg.load_config()
                 config["enabled"] = False
                 tg.save_config(config)
-                panel.write("[yellow]Telegram notifications disabled.[/]")
+                if self._telegram_listener and self._telegram_listener.running:
+                    self._telegram_listener.stop()
+                panel.write("[yellow]Telegram notifications disabled. Listener stopped.[/]")
+            elif sub == "listen":
+                if self._telegram_listener and self._telegram_listener.running:
+                    panel.write("[green]Telegram listener already running.[/]")
+                else:
+                    self._start_telegram_listener()
+                    if self._telegram_listener and self._telegram_listener.running:
+                        panel.write("[green]Telegram listener started.[/]")
+                    else:
+                        panel.write("[red]Failed to start listener. Check /telegram show for config.[/]")
             else:
-                panel.write("[dim]Usage: /telegram [show|test|on|off][/]")
+                panel.write("[dim]Usage: /telegram [show|test|on|off|listen][/]")
+
+        elif cmd == "/restart":
+            if self.crew_running:
+                self.crew_running = False
+            if self._heartbeat and self._heartbeat.running:
+                self._heartbeat.stop()
+            if self._telegram_listener and self._telegram_listener.running:
+                self._telegram_listener.stop()
+            # Stop daemon so it restarts fresh with new config
+            from daemon import is_running as daemon_is_running, stop as daemon_stop
+            if daemon_is_running():
+                daemon_stop()
+            self.exit(return_code=42)  # special code signals restart
+            return
 
         elif cmd in ("/exit", "/quit", "/q"):
+            # Stop local services but leave daemon running
             if self.crew_running:
                 self.crew_running = False
                 self._hide_activity()
             if self._heartbeat and self._heartbeat.running:
                 self._heartbeat.stop()
+            if self._telegram_listener and self._telegram_listener.running:
+                self._telegram_listener.stop()
+            # Daemon keeps running in background
             self.exit()
             return
 

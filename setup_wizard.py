@@ -161,10 +161,19 @@ def _setup_agent(index: int, preset_keys: list, presets: dict, available_tools: 
         if agent_id in used_ids:
             print(f"  ID '{agent_id}' already taken. Pick another.")
             continue
+        if "manager" in agent_id:
+            print(f"  ⚠ WARNING: CrewAI treats agents with 'manager' in the ID as hierarchical managers.")
+            print(f"    These agents CANNOT have tools assigned. Consider 'coordinator' or 'lead' instead.")
+            confirm = _prompt("  Keep this ID anyway? (y/n)", "n")
+            if confirm.lower() != "y":
+                continue
         break
 
     name = _prompt("Display name", agent_id.title())
     role = _prompt("Role (what CrewAI sees)", name)
+    if "manager" in role.lower() and "manager" not in agent_id:
+        print(f"  ⚠ WARNING: CrewAI may treat agents with 'manager' in the role as hierarchical managers.")
+        print(f"    These agents cannot have tools. Consider 'coordinator' or 'lead' instead.")
     goal = _prompt("Goal (1-2 sentences)")
     backstory = _prompt("Backstory (personality/expertise)")
 

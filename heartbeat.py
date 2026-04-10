@@ -136,6 +136,35 @@ def clear_done() -> int:
     return before - len(tasks)
 
 
+def _recover_stale_tasks(max_age_minutes: int = 30):
+    """Mark tasks stuck in 'running' for too long as failed."""
+    tasks = _load_queue()
+    changed = False
+    now = datetime.now()
+    for t in tasks:
+        if t["status"] != "running":
+            continue
+        started = t.get("started")
+        if not started:
+            # No start time recorded — mark failed immediately
+            t["status"] = "failed"
+            t["error"] = "No start time recorded; marked as stale"
+            t["completed"] = now.isoformat()
+            changed = True
+            continue
+        try:
+            started_dt = datetime.fromisoformat(started)
+            if (now - started_dt).total_seconds() > max_age_minutes * 60:
+                t["status"] = "failed"
+                t["error"] = f"Stale: running for over {max_age_minutes} minutes"
+                t["completed"] = now.isoformat()
+                changed = True
+        except Exception:
+            pass
+    if changed:
+        _save_queue(tasks)
+
+
 def next_pending() -> Optional[dict]:
     """Get the highest-priority pending task whose dependencies are met."""
     all_tasks = _load_queue()
@@ -345,6 +374,9 @@ class Heartbeat:
         """One heartbeat cycle: find next task, run it."""
         if self.on_tick:
             self.on_tick()
+
+        # Mark stale "running" tasks as failed (stuck > 30 min)
+        _recover_stale_tasks()
 
         task = next_pending()
         if not task:
