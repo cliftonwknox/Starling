@@ -54,13 +54,13 @@ BUILTIN_PRESETS = {
         "provider": "NVIDIA",
         "extra": {},
     },
-    "qwen": {
-        "label": "Qwen 3.5 (local)",
-        "model": "openai/qwen_qwen3.5-35b-a3b",
+    "local": {
+        "label": "Local Model (LM Studio/Ollama)",
+        "model": "openai/local-model",
         "base_url": "http://127.0.0.1:1234/v1",
         "api_format": "openai",
         "api_key_env": None,
-        "provider": "LM Studio",
+        "provider": "Local",
         "extra": {},
     },
     "qwen-plus": {

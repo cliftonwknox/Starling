@@ -14,6 +14,10 @@ wheels/
 telegram_config.json
 
 # Runtime data
+home/
+cron_config.json
+crewtui_daemon.pid
+crewtui_daemon.log
 project_config.json
 heartbeat_config.json
 task_queue.json

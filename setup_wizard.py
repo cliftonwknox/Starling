@@ -183,7 +183,7 @@ def _setup_agent(index: int, preset_keys: list, presets: dict, available_tools: 
         p = presets[key]
         print(f"    {i}) {key:18s} {p['label']} via {p['provider']}")
     while True:
-        choice = _prompt("Model preset", preset_keys[0] if preset_keys else "grok")
+        choice = _prompt("Model preset", preset_keys[0] if preset_keys else "")
         if choice in presets or choice.isdigit():
             if choice.isdigit():
                 idx = int(choice) - 1
@@ -383,13 +383,15 @@ def _generate_desktop_shortcut(project_name: str):
     safe_name = project_name.lower().replace(" ", "-")
     desktop_path = os.path.join(desktop_dir, f"crewtui-{safe_name}.desktop")
 
-    # Copy icon if our SVG exists
-    src_icon = os.path.expanduser("~/.local/share/icons/primevital.svg")
-    if os.path.exists(src_icon) and not os.path.exists(icon_path):
-        import shutil
-        shutil.copy2(src_icon, icon_path)
-
     project_dir = os.path.dirname(__file__)
+
+    # Install bundled icon if not already present
+    bundled_icon = os.path.join(project_dir, "crewtui.svg")
+    if os.path.exists(bundled_icon) and not os.path.exists(icon_path):
+        os.makedirs(os.path.dirname(icon_path), exist_ok=True)
+        import shutil
+        shutil.copy2(bundled_icon, icon_path)
+
     content = f"""[Desktop Entry]
 Name={project_name} (CrewTUI)
 Comment=Launch {project_name} Agent Command Center

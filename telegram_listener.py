@@ -115,7 +115,7 @@ class TelegramListener:
 
         parts = text.split(maxsplit=1)
         command = parts[0].lower().lstrip("/")
-        # Strip bot mention from command (e.g., /crew@Lovecraftllm_bot)
+        # Strip bot mention from command (e.g., /crew@MyBot_bot)
         if "@" in command:
             command = command.split("@")[0]
         args = parts[1] if len(parts) > 1 else ""

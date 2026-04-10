@@ -379,7 +379,9 @@ def build_agents_from_config(project_config: dict, presets: dict) -> dict:
 
     for agent_cfg in agents_cfg:
         aid = agent_cfg["id"]
-        preset_name = agent_cfg.get("preset", "grok")
+        preset_name = agent_cfg.get("preset")
+        if not preset_name:
+            raise ValueError(f"Agent '{aid}' has no model preset configured. Run 'crewtui models' to set one up.")
 
         try:
             llm = build_llm_from_preset(preset_name, presets)
