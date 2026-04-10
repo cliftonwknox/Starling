@@ -157,6 +157,46 @@ def run_setup():
     print(f"\n  Run 'crewtui' to launch the TUI.\n")
 
 
+def _check_preset_key(preset_name: str, presets: dict):
+    """Check if the selected preset needs an API key and prompt if missing."""
+    from dotenv import load_dotenv
+    source_env = os.path.join(os.path.dirname(__file__), ".env")
+    load_dotenv(source_env, override=False)
+
+    preset = presets.get(preset_name, {})
+    env_var = preset.get("api_key_env")
+    if not env_var:
+        return  # local model, no key needed
+
+    existing = os.environ.get(env_var)
+    if existing:
+        masked = existing[:4] + "..." + existing[-4:] if len(existing) > 12 else "****"
+        print(f"\n  API key {env_var}: {masked} (found)")
+        return
+
+    print(f"\n  {preset_name} requires {env_var} ({preset.get('provider', '?')})")
+    key = _prompt(f"Enter {env_var} (blank to skip)")
+    if key:
+        os.environ[env_var] = key
+        # Save to .env
+        existing_env = {}
+        if os.path.exists(source_env):
+            with open(source_env) as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        existing_env[k.strip()] = v.strip()
+        existing_env[env_var] = key
+        with open(source_env, "w") as f:
+            for k, v in existing_env.items():
+                f.write(f"{k}={v}\n")
+        os.chmod(source_env, 0o600)
+        print(f"  Saved {env_var} to .env")
+    else:
+        print(f"  Skipped. You can set {env_var} later in the Models tab or .env file.")
+
+
 def _setup_agent(index: int, preset_keys: list, presets: dict, available_tools: dict, used_ids: set) -> dict:
     """Configure a single agent with review/edit step."""
     # ID
@@ -202,6 +242,7 @@ def _setup_agent(index: int, preset_keys: list, presets: dict, available_tools: 
                 continue
         print(f"  Unknown preset. Enter a number or one of: {', '.join(preset_keys[:5])}...")
     preset = choice
+    _check_preset_key(preset, presets)
 
     # Tools
     tool_list = sorted(available_tools.keys())
@@ -289,6 +330,7 @@ def _setup_agent(index: int, preset_keys: list, presets: dict, available_tools: 
                         print("  Invalid number.")
                         continue
                 agent["preset"] = new_preset
+                _check_preset_key(new_preset, presets)
             else:
                 print("  Unknown preset.")
         elif edit == "7":
