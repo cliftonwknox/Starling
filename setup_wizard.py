@@ -157,6 +157,150 @@ def run_setup():
     print(f"\n  Run 'crewtui' to launch the TUI.\n")
 
 
+SKILL_PACKS = {
+    "leader": {
+        "label": "Leader",
+        "description": "Read reports, review documents, manage files",
+        "tools": [
+            "crewai:FileReadTool",
+            "crewai:DirectoryReadTool",
+            "crewai:DirectorySearchTool",
+            "crewai:PDFSearchTool",
+            "crewai:CSVSearchTool",
+            "crewai:JSONSearchTool",
+            "cron_tool",
+        ],
+    },
+    "researcher": {
+        "label": "Researcher",
+        "description": "Web search, scraping, read/write documents",
+        "tools": [
+            "ddg_search",
+            "tavily_search",
+            "scrape_website",
+            "crewai:FileReadTool",
+            "crewai:FileWriterTool",
+            "crewai:DirectoryReadTool",
+            "crewai:PDFSearchTool",
+            "crewai:DOCXSearchTool",
+            "crewai:TXTSearchTool",
+            "crewai:WebsiteSearchTool",
+        ],
+    },
+    "coordinator": {
+        "label": "Coordinator",
+        "description": "Document creation, file management, data coordination",
+        "tools": [
+            "crewai:FileReadTool",
+            "crewai:FileWriterTool",
+            "crewai:DirectoryReadTool",
+            "crewai:DirectorySearchTool",
+            "crewai:CSVSearchTool",
+            "crewai:JSONSearchTool",
+            "crewai:MDXSearchTool",
+            "crewai:TXTSearchTool",
+        ],
+    },
+    "seo_marketing": {
+        "label": "SEO / Marketing",
+        "description": "Web research, website analysis, content marketing",
+        "tools": [
+            "ddg_search",
+            "tavily_search",
+            "scrape_website",
+            "crewai:WebsiteSearchTool",
+            "crewai:ScrapeElementFromWebsiteTool",
+            "crewai:FileReadTool",
+            "crewai:FileWriterTool",
+            "crewai:GithubSearchTool",
+            "crewai:YoutubeVideoSearchTool",
+        ],
+    },
+}
+
+
+def _pick_tools(available_tools: dict) -> list:
+    """Let user pick a skill pack or go custom."""
+    print(f"\n  Skill Packs:")
+    packs = list(SKILL_PACKS.items())
+    for i, (key, pack) in enumerate(packs, 1):
+        print(f"    {i}) {pack['label']:18s} -- {pack['description']}")
+    print(f"    {len(packs) + 1}) {'Custom':18s} -- Pick tools one at a time")
+    print(f"    {len(packs) + 2}) {'None':18s} -- No tools")
+
+    while True:
+        choice = _prompt("Skill pack", "1")
+        if choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(packs):
+                pack_key, pack = packs[idx - 1]
+                # Filter to tools that actually exist in the registry
+                tools = [t for t in pack["tools"] if t in available_tools]
+                missing = [t for t in pack["tools"] if t not in available_tools]
+                print(f"\n  {pack['label']} pack loaded ({len(tools)} tools):")
+                for t in tools:
+                    desc = available_tools[t]["description"][:45]
+                    print(f"    + {t} -- {desc}")
+                if missing:
+                    print(f"  Skipped (not available): {', '.join(missing)}")
+                return tools
+            elif idx == len(packs) + 1:
+                # Custom picker
+                return _pick_tools_custom(available_tools)
+            elif idx == len(packs) + 2:
+                return []
+        # Try matching by name
+        lower = choice.lower().replace(" ", "_")
+        if lower in SKILL_PACKS:
+            pack = SKILL_PACKS[lower]
+            tools = [t for t in pack["tools"] if t in available_tools]
+            print(f"\n  {pack['label']} pack loaded ({len(tools)} tools):")
+            for t in tools:
+                desc = available_tools[t]["description"][:45]
+                print(f"    + {t} -- {desc}")
+            return tools
+        print(f"  Invalid choice. Enter 1-{len(packs) + 2}.")
+
+
+def _pick_tools_custom(available_tools: dict) -> list:
+    """Interactive one-at-a-time tool picker."""
+    tool_list = sorted(available_tools.keys())
+    print(f"\n  Available tools ({len(tool_list)}):")
+    for i, tid in enumerate(tool_list, 1):
+        info = available_tools[tid]
+        print(f"    {i:2d}) {tid} -- {info['description'][:40]}")
+
+    print(f"\n  Enter tool numbers one at a time. Blank when done.")
+    selected = []
+    while True:
+        entry = _prompt(f"Add tool ({len(selected)} selected, blank=done)", "")
+        if not entry:
+            break
+        if entry.isdigit():
+            idx = int(entry) - 1
+            if 0 <= idx < len(tool_list):
+                tid = tool_list[idx]
+                if tid in selected:
+                    print(f"  Already selected: {tid}")
+                else:
+                    selected.append(tid)
+                    print(f"    + {tid}")
+            else:
+                print(f"  Invalid number. Enter 1-{len(tool_list)}.")
+        elif entry in available_tools:
+            if entry in selected:
+                print(f"  Already selected: {entry}")
+            else:
+                selected.append(entry)
+                print(f"    + {entry}")
+        else:
+            print(f"  Unknown tool: {entry}")
+
+    if selected:
+        print(f"  Selected {len(selected)} tools: {', '.join(selected)}")
+    return selected
+
+
 def _check_preset_key(preset_name: str, presets: dict):
     """Check if the selected preset needs an API key and prompt if missing."""
     from dotenv import load_dotenv
@@ -244,25 +388,8 @@ def _setup_agent(index: int, preset_keys: list, presets: dict, available_tools: 
     preset = choice
     _check_preset_key(preset, presets)
 
-    # Tools
-    tool_list = sorted(available_tools.keys())
-    if tool_list:
-        print(f"\n  Available tools:")
-        for i, tid in enumerate(tool_list, 1):
-            info = available_tools[tid]
-            print(f"    {i}) {tid} -- {info['description'][:40]}")
-        print(f"\n  Enter numbers or IDs, comma-separated. Blank for none.")
-    tools_input = _prompt("Tools (comma-sep, blank=none)", "")
-    tools = []
-    if tools_input.strip():
-        for part in tools_input.split(","):
-            part = part.strip()
-            if part.isdigit():
-                idx = int(part) - 1
-                if 0 <= idx < len(tool_list):
-                    tools.append(tool_list[idx])
-            elif part in available_tools:
-                tools.append(part)
+    # Tools — skill packs
+    tools = _pick_tools(available_tools)
 
     # Color
     color = COLORS[index % len(COLORS)]
@@ -334,18 +461,7 @@ def _setup_agent(index: int, preset_keys: list, presets: dict, available_tools: 
             else:
                 print("  Unknown preset.")
         elif edit == "7":
-            tools_input = _prompt("Tools (comma-sep, blank=none)", ", ".join(agent["tools"]))
-            new_tools = []
-            if tools_input.strip():
-                for part in tools_input.split(","):
-                    part = part.strip()
-                    if part.isdigit():
-                        idx = int(part) - 1
-                        if 0 <= idx < len(tool_list):
-                            new_tools.append(tool_list[idx])
-                    elif part in available_tools:
-                        new_tools.append(part)
-            agent["tools"] = new_tools
+            agent["tools"] = _pick_tools(available_tools)
         elif edit == "8":
             new_color = _prompt("Color", agent["color"])
             if new_color in COLORS:
