@@ -191,6 +191,7 @@ class AgentPanel(Vertical):
         self.agent_id = agent_id
         self.agent_info = display_info
         self._buffer: list[str] = []
+        self._raw_status: str = "idle"
 
     def compose(self) -> ComposeResult:
         color = self.agent_info["color"]
@@ -211,6 +212,18 @@ class AgentPanel(Vertical):
         )
 
     def set_status(self, status: str):
+        # Extract raw keyword for status tracking
+        s = status.lower()
+        if "done" in s:
+            self._raw_status = "done"
+        elif "working" in s or "thinking" in s:
+            self._raw_status = "working"
+        elif "waiting" in s:
+            self._raw_status = "waiting"
+        elif "error" in s:
+            self._raw_status = "error"
+        else:
+            self._raw_status = "idle"
         color = self.agent_info["color"]
         name = self.agent_info["name"]
         model = self.agent_info["model"]
@@ -336,7 +349,7 @@ class CrewTUIApp(App):
         self.current_agent = ""
         self.crew_running = False
         self._crew_start_time = None
-        self._active_agent_name = ""
+        self._crew_tasks = []  # list of {"desc": ..., "agent": ..., "done": bool}
         self._components = None
         self._heartbeat = None
 
@@ -454,6 +467,17 @@ class CrewTUIApp(App):
             self.notify("Heartbeat auto-started")
             self._load_queue_view()
 
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        """Show/hide agent selector based on active tab."""
+        try:
+            select = self.query_one("#agent-select", Static)
+            if event.pane.id == "tab-agents":
+                select.display = True
+            else:
+                select.display = False
+        except Exception:
+            pass
+
     def _log_status(self, text: str):
         """Append a line to the Status tab log."""
         try:
@@ -484,52 +508,31 @@ class CrewTUIApp(App):
             secs = elapsed % 60
             time_str = f"{mins}m {secs}s" if mins else f"{secs}s"
 
-            # Progress bar
+            # Progress bar based on tasks completed
+            total = len(self._crew_tasks) or 1
+            done_count = sum(1 for t in self._crew_tasks if t["done"])
+            progress = done_count / total
             bar_width = 40
-            # Estimate progress based on agent count (rough)
-            progress = min(elapsed / max(len(self._agent_ids) * 60, 1), 0.95)
             filled = int(bar_width * progress)
             bar = "[bold yellow]" + "#" * filled + "[/][dim]" + "-" * (bar_width - filled) + "[/]"
 
-            log.write(f"[bold yellow]CREW RUNNING[/]  {time_str} elapsed\n")
+            log.write(f"[bold yellow]CREW RUNNING[/]  {time_str} elapsed  ({done_count}/{total} tasks)\n")
             log.write(f"  [{bar}]\n")
             log.write("")
 
-            # Agent statuses
-            log.write("[bold]Agent Status:[/]")
-            for a in self._agents_cfg:
-                aid = a["id"]
-                name = a["name"]
-                color = a.get("color", "white")
-                if self._active_agent_name == name:
-                    status = f"[bold yellow]WORKING...[/]"
-                    indicator = "[bold yellow]>>>[/]"
+            # Task list
+            log.write("[bold]Tasks:[/]")
+            for i, t in enumerate(self._crew_tasks):
+                if t["done"]:
+                    indicator = "[green]OK[/]"
+                    status = "[bold green]DONE[/]"
+                elif i == done_count:
+                    indicator = "[bold yellow]>>[/]"
+                    status = "[bold yellow]RUNNING[/]"
                 else:
-                    # Check if this agent has completed
-                    try:
-                        panel = self.query_one(f"#panel-{aid}", AgentPanel)
-                        status_w = self.query_one(f"#status-{aid}", Static)
-                        rendered = str(status_w.render())
-                        if "done" in rendered:
-                            status = "[bold green]DONE[/]"
-                            indicator = "[green]OK[/] "
-                        elif "error" in rendered:
-                            status = "[bold red]ERROR[/]"
-                            indicator = "[red]!![/] "
-                        elif "working" in rendered:
-                            status = "[bold yellow]WORKING...[/]"
-                            indicator = "[bold yellow]>>>[/]"
-                        elif "waiting" in rendered:
-                            status = "[dim]WAITING[/]"
-                            indicator = "[dim]...[/]"
-                        else:
-                            status = "[dim]IDLE[/]"
-                            indicator = "[dim]  [/] "
-                    except Exception:
-                        status = "[dim]IDLE[/]"
-                        indicator = "[dim]  [/] "
-                preset = a.get("preset", "?")
-                log.write(f"  {indicator} [{color}]{name:20s}[/] {status}  [dim]({preset})[/]")
+                    indicator = "[dim]..[/]"
+                    status = "[dim]PENDING[/]"
+                log.write(f"  {indicator} {t['agent']:20s} {status}  [dim]{t['desc'][:50]}[/]")
 
         elif self._heartbeat and self._heartbeat.running:
             st = self._heartbeat.status()
@@ -1072,8 +1075,21 @@ class CrewTUIApp(App):
             crew, components = build_crew_from_config(self._project_config, MODEL_PRESETS, mission=mission)
             self._components = components
             logger.info(f"Crew built: {len(crew.tasks)} tasks, {len(components['agents'])} agents")
+            # Capture task list for Status tab
+            self._crew_tasks = []
             for i, t in enumerate(crew.tasks):
                 agent_role = getattr(t.agent, 'role', '?') if t.agent else '?'
+                # Find agent name from config
+                agent_name = agent_role
+                for a in self._agents_cfg:
+                    if a["role"] == agent_role:
+                        agent_name = a["name"]
+                        break
+                self._crew_tasks.append({
+                    "desc": t.description[:80],
+                    "agent": agent_name,
+                    "done": False,
+                })
                 logger.info(f"  Task {i}: agent={agent_role}, desc={t.description[:50]}")
 
             # Build reverse lookup: Agent object -> agent_id
@@ -1108,20 +1124,25 @@ class CrewTUIApp(App):
                 output_text = str(getattr(step_output, 'output', step_output))
                 if len(output_text) > 500:
                     output_text = output_text[:500] + "..."
-                # Track active agent for activity bar
-                agent_cfg = next((a for a in self._agents_cfg if a["id"] == agent_id), None)
-                self._active_agent_name = agent_cfg["name"] if agent_cfg else agent_id
                 self.post_message(AgentStatus(agent_id, "[bold yellow]working...[/]"))
                 self.post_message(AgentOutput(agent_id, f"[dim]Step:[/] {output_text}"))
+
+            _task_index = [0]  # mutable counter for sequential task tracking
 
             def task_callback(task_output):
                 agent_ref = getattr(task_output, 'agent', None)
                 agent_id = _resolve_agent_id(agent_ref)
+                # Mark task done in our tracking list
+                idx = _task_index[0]
+                if idx < len(self._crew_tasks):
+                    self._crew_tasks[idx]["done"] = True
+                    _task_index[0] += 1
                 output_text = str(getattr(task_output, 'raw', getattr(task_output, 'output', task_output)))
                 if len(output_text) > 2000:
                     output_text = output_text[:2000] + "\n[dim]... (truncated)[/]"
                 self.post_message(AgentStatus(agent_id, "[bold green]done[/]"))
                 self.post_message(AgentOutput(agent_id, f"[bold green]Task complete:[/]\n{output_text}"))
+                self._update_status_tab()
 
             crew.step_callback = step_callback
             crew.task_callback = task_callback
