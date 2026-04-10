@@ -149,6 +149,44 @@ def status():
         print("Daemon is NOT running.")
 
 
+def _build_report_context(out_dir: str, max_reports: int = 3, max_chars: int = 3000) -> str:
+    """Build context with recent report summaries injected directly.
+
+    Includes actual report content so agents don't need file tools.
+    """
+    try:
+        if not os.path.exists(out_dir):
+            return ""
+        report_files = sorted(
+            [f for f in os.listdir(out_dir) if f.endswith(".md")],
+            key=lambda f: os.path.getmtime(os.path.join(out_dir, f)),
+            reverse=True,
+        )[:max_reports]
+        if not report_files:
+            return ""
+
+        sections = ["\n\n--- PREVIOUS REPORTS (for reference) ---"]
+        chars_used = 0
+        for fname in report_files:
+            try:
+                with open(os.path.join(out_dir, fname)) as f:
+                    content = f.read()
+                # Truncate individual reports to fit budget
+                remaining = max_chars - chars_used
+                if remaining <= 200:
+                    break
+                if len(content) > remaining:
+                    content = content[:remaining] + "\n...(truncated)"
+                sections.append(f"\n### {fname}\n{content}")
+                chars_used += len(content)
+            except Exception:
+                continue
+        sections.append("--- END PREVIOUS REPORTS ---")
+        return "\n".join(sections)
+    except Exception:
+        return ""
+
+
 def _run_daemon():
     """Main daemon loop — heartbeat + Telegram listener."""
     from dotenv import load_dotenv
@@ -177,32 +215,40 @@ def _run_daemon():
         return components
 
     def run_task(task):
-        """Execute a single-agent task."""
+        """Execute a single-agent task using CrewAI (with tools)."""
+        from crewai import Crew, Task as CrewTask
+        from config_loader import get_output_dir
+
         comps = ensure_components()
         agent_id = task.get("agent", "")
         agent = comps["agents"].get(agent_id)
-        llm = comps["llms"].get(agent_id)
 
-        if not agent or not llm:
+        if not agent:
             raise ValueError(f"Unknown agent: {agent_id}")
 
         memory_context = mem.get_agent_context(agent_id)
-        memory_section = f"\n\n## Your Memory\n{memory_context}" if memory_context else ""
+        memory_section = f"\nAgent memory context:\n{memory_context}" if memory_context else ""
 
-        system_prompt = (
-            f"You are {agent.role}. {agent.backstory} "
-            f"Complete the following task thoroughly."
-            f"{memory_section}"
+        # List recent reports for context
+        recent_reports = _build_report_context(out_dir)
+
+        crew_task = CrewTask(
+            description=f"{task['description']}{memory_section}{recent_reports}",
+            expected_output="A thorough report with findings and recommendations.",
+            agent=agent,
         )
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": task["description"]},
-        ]
+        out_dir = get_output_dir()
+        os.makedirs(out_dir, exist_ok=True)
+        original_cwd = os.getcwd()
+        os.chdir(out_dir)
+        try:
+            crew = Crew(agents=[agent], tasks=[crew_task], verbose=True)
+            result = crew.kickoff()
+        finally:
+            os.chdir(original_cwd)
 
-        logger.info(f"Running task: {task['description'][:60]} -> {agent_id}")
-        response = llm.call(messages=messages)
-        result = str(response) if response else "No response"
+        result = str(result) if result else "No response"
 
         mem.add_episodic(
             agent_id,
@@ -223,6 +269,9 @@ def _run_daemon():
 
         out_dir = get_output_dir()
         os.makedirs(out_dir, exist_ok=True)
+
+        # Append report context to mission
+        mission += _build_report_context(out_dir)
 
         original_cwd = os.getcwd()
         os.chdir(out_dir)
@@ -266,9 +315,37 @@ def _run_daemon():
         except Exception:
             pass
 
+    def on_tick():
+        """Check for due cron jobs on each heartbeat cycle."""
+        try:
+            import cron_engine
+            due_jobs = cron_engine.check_due_jobs()
+            for job in due_jobs:
+                hb.add_task(
+                    description=job["description"],
+                    agent=job.get("agent"),
+                    crew=job.get("crew", False),
+                    tags=["cron", f"cron:{job['id']}",
+                          "report" if job.get("report", True) else "no-report"],
+                )
+                logger.info(f"Cron fired: {job['name']} -> queued")
+                try:
+                    import telegram_notify as tg
+                    tg.send_message(
+                        f"*{project_name} Cron Fired*\n\n"
+                        f"*Job:* {job['name']}\n"
+                        f"*Schedule:* {job['schedule']}\n"
+                        f"*Next run:* {job.get('next_run', '?')[:16]}"
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"Cron check error: {e}")
+
     # Start heartbeat
     heartbeat = hb.Heartbeat(
         interval=hb.load_heartbeat_config().get("interval", 60),
+        on_tick=on_tick,
         on_task_start=on_task_start,
         on_task_done=on_task_done,
         on_task_fail=on_task_fail,

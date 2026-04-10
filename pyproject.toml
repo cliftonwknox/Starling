@@ -21,4 +21,4 @@ dependencies = [
 crewtui = "cli:main"
 
 [tool.setuptools]
-py-modules = ["cli", "tui", "crew", "heartbeat", "agent_memory", "model_wizard", "telegram_notify", "telegram_listener", "config_loader", "setup_wizard", "daemon"]
+py-modules = ["cli", "tui", "crew", "heartbeat", "agent_memory", "model_wizard", "telegram_notify", "telegram_listener", "config_loader", "setup_wizard", "daemon", "cron_engine"]

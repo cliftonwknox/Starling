@@ -9,9 +9,11 @@ from textual.widgets import (
     RichLog,
     Static,
     Input,
-    DirectoryTree,
     TabbedContent,
     TabPane,
+    ListView,
+    ListItem,
+    Label,
 )
 from textual.binding import Binding
 from textual.message import Message
@@ -101,6 +103,12 @@ HELP_TEXT = """[bold]Commands:[/]
   [cyan]/skills[/] unassign <tool> <agent> — Remove tool from agent
   [cyan]/skills[/] new           — Scaffold custom skill template
   [cyan]/skills[/] refresh       — Rescan skills directory
+  [cyan]/cron[/] add              — Add a scheduled job (wizard)
+  [cyan]/cron[/] list             — Show all cron jobs
+  [cyan]/cron[/] remove <id>     — Delete a cron job
+  [cyan]/cron[/] on/off <id>     — Enable/disable a cron job
+  [cyan]/cron[/] approve <id>    — Approve agent-proposed job
+  [cyan]/cron[/] reject <id>     — Reject agent-proposed job
   [cyan]/delete[/] <file>        — Delete an output file
   [cyan]/delete[/] all           — Delete all output files
   [cyan]/copy[/]                 — Copy current panel to clipboard (or Ctrl+Y)
@@ -306,10 +314,33 @@ class CrewTUIApp(App):
     #file-area {
         height: 1fr;
     }
-    #file-tree {
-        width: 30;
+    #file-filter-bar {
+        height: 3;
+        padding: 0 1;
+        background: $surface;
+    }
+    .file-filter {
+        width: auto;
+        padding: 0 2;
+        margin: 0 1;
+        height: 3;
+        content-align: center middle;
+    }
+    .file-filter-active {
+        background: $primary;
+        color: $text;
+    }
+    #file-content-area {
+        height: 1fr;
+    }
+    #file-list {
+        width: 35;
         height: 1fr;
         border-right: solid $primary-background;
+    }
+    #file-list > ListItem {
+        padding: 0 1;
+        height: 1;
     }
     #file-viewer {
         width: 1fr;
@@ -353,6 +384,8 @@ class CrewTUIApp(App):
         self._components = None
         self._heartbeat = None
         self._telegram_listener = None
+        self._cron_wizard = None  # {"step": N, "data": {...}}
+        self._file_filter = "chronological"  # chronological, heartbeat, report, decision
 
         # Load config
         from config_loader import config_exists, load_project_config
@@ -398,12 +431,17 @@ class CrewTUIApp(App):
                             info = get_agent_display(agent_cfg)
                             yield AgentPanel(agent_cfg["id"], info, id=f"panel-{agent_cfg['id']}")
             with TabPane("Files", id="tab-files"):
-                with Horizontal(id="file-area"):
-                    if os.path.exists(out_dir):
-                        yield DirectoryTree(out_dir, id="file-tree")
-                    else:
-                        yield Static("[dim]No output directory yet.[/]", id="file-tree-empty")
-                    yield RichLog(id="file-viewer", highlight=True, markup=True, wrap=True)
+                with Vertical(id="file-area"):
+                    yield Horizontal(
+                        Static("[bold cyan] Chronological [/]", id="file-filter-chronological", classes="file-filter file-filter-active"),
+                        Static("[bold] Recurring [/]", id="file-filter-heartbeat", classes="file-filter"),
+                        Static("[bold] Reports [/]", id="file-filter-report", classes="file-filter"),
+                        Static("[bold] Decisions [/]", id="file-filter-decision", classes="file-filter"),
+                        id="file-filter-bar",
+                    )
+                    with Horizontal(id="file-content-area"):
+                        yield ListView(id="file-list")
+                        yield RichLog(id="file-viewer", highlight=True, markup=True, wrap=True)
             with TabPane("History", id="tab-history"):
                 yield RichLog(id="history-log", highlight=True, markup=True, wrap=True)
             with TabPane("Config", id="tab-config"):
@@ -412,6 +450,8 @@ class CrewTUIApp(App):
                 yield RichLog(id="queue-log", highlight=True, markup=True, wrap=True)
             with TabPane("Skills", id="tab-skills"):
                 yield RichLog(id="skills-log", highlight=True, markup=True, wrap=True)
+            with TabPane("Cron", id="tab-cron"):
+                yield RichLog(id="cron-log", highlight=True, markup=True, wrap=True)
             with TabPane("Status", id="tab-status"):
                 yield RichLog(id="status-log", highlight=True, markup=True, wrap=True)
 
@@ -456,6 +496,7 @@ class CrewTUIApp(App):
         self._load_config_view()
         self._load_queue_view()
         self._load_skills_view()
+        self._load_cron_view()
 
         # Start daemon if not already running — it handles heartbeat + telegram
         from daemon import is_running as daemon_is_running, start as daemon_start
@@ -483,7 +524,8 @@ class CrewTUIApp(App):
         self._update_status_tab()
         self.set_interval(3, self._update_status_tab, name="status-refresh")
         self.set_interval(5, self._load_queue_view, name="queue-refresh")
-        self.set_interval(5, self._refresh_file_tree, name="files-refresh")
+        self.set_interval(5, self._refresh_file_list, name="files-refresh")
+        self.set_interval(5, self._load_cron_view, name="cron-refresh")
 
     def _start_telegram_listener(self):
         """Start Telegram listener if bot is configured."""
@@ -741,6 +783,46 @@ class CrewTUIApp(App):
             if t.get("result") and t["status"] == "done":
                 log.write(f"           [green]Result: {t['result'][:80]}[/]")
 
+    def _load_cron_view(self):
+        import cron_engine
+        try:
+            log = self.query_one("#cron-log", RichLog)
+        except Exception:
+            return
+        log.clear()
+        jobs = cron_engine.list_crons()
+        if not jobs:
+            log.write("[dim]No cron jobs. Use /cron add to create one.[/]\n")
+            log.write("[dim]Agents can also create crons using the Cron Scheduler tool.[/]")
+            return
+        log.write(f"[bold]Scheduled Jobs[/] ({len(jobs)})\n")
+        status_colors = {
+            "active": "green", "disabled": "dim",
+            "pending_approval": "yellow", "rejected": "red",
+        }
+        for j in jobs:
+            color = status_colors.get(j["status"], "white")
+            sid = j["id"][-6:]
+            agent = j.get("agent") or ("CREW" if j.get("crew") else "auto")
+            next_run = j.get("next_run", "")[:16] if j.get("next_run") else "—"
+            last_run = j.get("last_run", "")[:16] if j.get("last_run") else "never"
+            runs = j.get("run_count", 0)
+            log.write(
+                f"  [{color}]{j['status']:18s}[/] "
+                f"[dim]#{sid}[/] "
+                f"[bold]{j['name']}[/]"
+            )
+            log.write(
+                f"           {j['schedule']:20s} -> [bold]{agent}[/]  "
+                f"[dim]Runs: {runs} | Last: {last_run} | Next: {next_run}[/]"
+            )
+            log.write(f"           {j['description'][:70]}")
+            if j.get("last_error"):
+                log.write(f"           [red]Error: {j['last_error'][:60]}[/]")
+            if j["status"] == "pending_approval":
+                log.write(f"           [yellow]Awaiting approval: /cron approve {sid}[/]")
+            log.write("")
+
     def _load_skills_view(self):
         from crew import list_available_tools
         from config_loader import load_project_config, save_project_config
@@ -960,26 +1042,185 @@ class CrewTUIApp(App):
 
     # === File viewer ===
 
-    def _refresh_file_tree(self):
-        """Reload the directory tree in the Files tab."""
-        try:
-            tree = self.query_one("#file-tree", DirectoryTree)
-            tree.reload()
-        except Exception:
-            pass
+    def _cron_wizard_step(self, answer: str):
+        """Process one step of the cron wizard."""
+        import cron_engine
+        panel = self.query_one(f"#panel-{self.current_agent}", AgentPanel)
+        wiz = self._cron_wizard
+        step = wiz["step"]
+        data = wiz["data"]
 
-    def on_directory_tree_file_selected(self, event: DirectoryTree.FileSelected) -> None:
+        if step == 1:  # Name
+            data["name"] = answer
+            wiz["step"] = 2
+            panel.write(f"  [green]→[/] {answer}\n")
+            panel.write("[bold]Step 2/6:[/] How often should it run?")
+            panel.write("[dim]  Formats: daily 08:00, weekly mon 9:00, every 6h, hourly, monthly 1 09:00[/]")
+
+        elif step == 2:  # Schedule
+            try:
+                cron_engine.parse_schedule(answer)
+            except ValueError as e:
+                panel.write(f"  [red]{e}[/]")
+                panel.write("[dim]  Try again: daily 08:00, weekly mon 9:00, every 6h, hourly[/]")
+                return
+            data["schedule"] = answer
+            wiz["step"] = 3
+            panel.write(f"  [green]→[/] {answer}\n")
+            panel.write("[bold]Step 3/6:[/] Who should run it?\n")
+            panel.write("  [bold cyan]0)[/] Full Crew [dim](all agents collaborate)[/]")
+            for i, a in enumerate(self._agents_cfg, 1):
+                color = a.get("color", "white")
+                panel.write(f"  [bold cyan]{i})[/] [{color}]{a['name']}[/] [dim]({a['id']} — {a['role']})[/]")
+            panel.write("\n[dim]  Enter a number:[/]")
+
+        elif step == 3:  # Crew or agent
+            choice = answer.strip()
+            if choice == "0" or choice.lower() == "crew":
+                data["crew"] = True
+                data["agent"] = None
+                panel.write(f"  [green]→[/] Full Crew\n")
+            elif choice.isdigit() and 1 <= int(choice) <= len(self._agents_cfg):
+                idx = int(choice) - 1
+                a = self._agents_cfg[idx]
+                data["crew"] = False
+                data["agent"] = a["id"]
+                panel.write(f"  [green]→[/] {a['name']} ({a['id']})\n")
+            elif choice.lower() in self._agent_ids:
+                data["crew"] = False
+                data["agent"] = choice.lower()
+                panel.write(f"  [green]→[/] @{choice.lower()}\n")
+            else:
+                panel.write(f"  [red]Invalid choice. Enter 0 for crew or 1-{len(self._agents_cfg)} for an agent.[/]")
+                return
+            wiz["step"] = 4
+            panel.write("[bold]Step 4/6:[/] What's the mission/prompt?")
+            panel.write("[dim]  e.g., research competitor pricing for compression socks[/]")
+
+        elif step == 4:  # Mission
+            data["mission"] = answer
+            wiz["step"] = 5
+            panel.write(f"  [green]→[/] {answer}\n")
+            panel.write("[bold]Step 5/6:[/] Generate a report file when done?")
+            panel.write("[dim]  yes = save output to Files tab  |  no = Telegram notification only[/]")
+
+        elif step == 5:  # Report
+            data["report"] = answer.lower() in ("yes", "y")
+            wiz["step"] = 6
+            report_str = "Yes" if data["report"] else "No"
+            panel.write(f"  [green]→[/] {report_str}\n")
+            # Summary
+            mode = "Full Crew" if data.get("crew") else f"@{data['agent']}"
+            for a in self._agents_cfg:
+                if a["id"] == data.get("agent"):
+                    mode = f"{a['name']} ({a['id']})"
+                    break
+            panel.write("[bold]Step 6/6:[/] Confirm and create?\n")
+            panel.write(f"  [bold]Name:[/]     {data['name']}")
+            panel.write(f"  [bold]Schedule:[/] {data['schedule']}")
+            panel.write(f"  [bold]Run by:[/]   {mode}")
+            panel.write(f"  [bold]Mission:[/]  {data['mission']}")
+            panel.write(f"  [bold]Report:[/]   {report_str}")
+            panel.write("\n  [dim]Type 'yes' to create, 'no' to cancel[/]")
+
+        elif step == 6:  # Confirm
+            if answer.lower() in ("yes", "y"):
+                try:
+                    job = cron_engine.add_cron(
+                        name=data["name"],
+                        description=data["mission"],
+                        schedule=data["schedule"],
+                        agent=data.get("agent"),
+                        crew=data.get("crew", True),
+                        report=data.get("report", True),
+                    )
+                    panel.write(f"\n[green]Cron job created![/]")
+                    panel.write(f"  ID: #{job['id'][-6:]}  |  Next run: {job['next_run'][:16]}")
+                    self._load_cron_view()
+                except ValueError as e:
+                    panel.write(f"\n[red]Error: {e}[/]")
+            else:
+                panel.write("[yellow]Cancelled.[/]")
+            self._cron_wizard = None
+
+    def _refresh_file_list(self):
+        """Reload the file list with current filter."""
+        try:
+            file_list = self.query_one("#file-list", ListView)
+        except Exception:
+            return
+        file_list.clear()
+        out_dir = _output_dir()
+        if not os.path.exists(out_dir):
+            return
+
+        files = sorted(
+            [f for f in os.listdir(out_dir) if os.path.isfile(os.path.join(out_dir, f))],
+            key=lambda f: os.path.getmtime(os.path.join(out_dir, f)),
+            reverse=True,
+        )
+
+        # Apply filter — type tabs show only that type, chronological shows all
+        if self._file_filter == "heartbeat":
+            files = [f for f in files if f.startswith("heartbeat_")]
+        elif self._file_filter == "report":
+            files = [f for f in files if f.startswith("report_")]
+        elif self._file_filter == "decision":
+            files = [f for f in files if f.startswith("decision_")]
+
+        self._filtered_files = files
+
+        for f in files:
+            if f.startswith("heartbeat_"):
+                icon = "H"
+                color = "cyan"
+            elif f.startswith("report_"):
+                icon = "R"
+                color = "green"
+            elif f.startswith("decision_"):
+                icon = "D"
+                color = "yellow"
+            else:
+                icon = "·"
+                color = "white"
+            display = f.replace(".md", "")
+            if len(display) > 28:
+                display = display[:28] + "…"
+            item = ListItem(Label(f"[{color}]{icon}[/] {display}"), name=f)
+            file_list.append(item)
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """Handle file selection in the file list."""
+        filename = event.item.name
+        if filename:
+            self._show_file(filename)
+
+    def _show_file(self, filename: str) -> None:
+        """Display a file in the viewer panel."""
         viewer = self.query_one("#file-viewer", RichLog)
         viewer.clear()
-        path = str(event.path)
+        out_dir = _output_dir()
+        path = os.path.join(out_dir, filename)
         try:
             with open(path) as f:
                 content = f.read()
-            viewer.write(f"[bold]{os.path.basename(path)}[/]")
+            viewer.write(f"[bold]{filename}[/]")
             viewer.write(f"[dim]{path}[/]\n")
             viewer.write(content)
         except Exception as e:
             viewer.write(f"[bold red]Error reading file:[/] {e}")
+
+    def on_click(self, event) -> None:
+        """Handle clicks on filter tabs."""
+        widget = event.widget if hasattr(event, 'widget') else None
+        if widget and hasattr(widget, 'id') and widget.id and widget.id.startswith("file-filter-"):
+            filter_name = widget.id.replace("file-filter-", "")
+            self._file_filter = filter_name
+            # Update active styling
+            for child in self.query(".file-filter"):
+                child.remove_class("file-filter-active")
+            widget.add_class("file-filter-active")
+            self._refresh_file_list()
 
     # === Message handlers ===
 
@@ -1005,7 +1246,7 @@ class CrewTUIApp(App):
             for aid in self._agent_ids:
                 panel = self.query_one(f"#panel-{aid}", AgentPanel)
                 panel.set_status("[bold green]done[/]")
-            self._refresh_file_tree()
+            self._refresh_file_list()
             threading.Thread(target=self._send_telegram_complete,
                              args=(message.mission, message.duration, message.output_files), daemon=True).start()
         else:
@@ -1293,6 +1534,16 @@ class CrewTUIApp(App):
         if not message:
             return
         event.input.value = ""
+
+        # Handle active cron wizard
+        if self._cron_wizard is not None:
+            if message.lower() in ("/cancel", "cancel"):
+                self._cron_wizard = None
+                panel = self.query_one(f"#panel-{self.current_agent}", AgentPanel)
+                panel.write("[yellow]Cron wizard cancelled.[/]")
+            else:
+                self._cron_wizard_step(message)
+            return
 
         if message.startswith("/"):
             self._handle_command(message)
@@ -1795,6 +2046,126 @@ class CrewTUIApp(App):
             else:
                 panel.write("[dim]Usage: /skills [show|install|assign|unassign|new|refresh][/]")
 
+        elif cmd == "/cron":
+            import cron_engine
+            sub = parts[1].lower() if len(parts) > 1 else "list"
+            panel = self.query_one(f"#panel-{self.current_agent}", AgentPanel)
+
+            if sub == "add":
+                # Quick one-liner: /cron add name | schedule | mission
+                raw = command.split(maxsplit=2)[2] if len(command.split(maxsplit=2)) > 2 else ""
+                if raw and "|" in raw:
+                    fields = [f.strip() for f in raw.split("|")]
+                    if len(fields) >= 3:
+                        name, schedule, mission_raw = fields[0], fields[1], fields[2]
+                        crew_mode = True
+                        agent = None
+                        if mission_raw.startswith("@"):
+                            agent_part, _, mission_raw = mission_raw.partition(" ")
+                            agent = agent_part[1:]
+                            crew_mode = False
+                        try:
+                            job = cron_engine.add_cron(
+                                name=name, description=mission_raw,
+                                schedule=schedule, agent=agent, crew=crew_mode,
+                            )
+                            mode = "CREW" if crew_mode else f"@{agent}"
+                            panel.write(f"[green]Cron added:[/] {name}")
+                            panel.write(f"  Schedule: {schedule} | Mode: {mode}")
+                            panel.write(f"  Next run: {job['next_run'][:16]}")
+                            panel.write(f"  ID: #{job['id'][-6:]}")
+                            self._load_cron_view()
+                        except ValueError as e:
+                            panel.write(f"[red]Error: {e}[/]")
+                        return
+                # Start interactive wizard
+                self._cron_wizard = {"step": 1, "data": {}}
+                panel.write("[bold cyan]━━━ Cron Job Wizard ━━━[/]")
+                panel.write("[dim]Type 'cancel' at any step to abort.[/]\n")
+                panel.write("[bold]Step 1/5:[/] What should this job be called?")
+                panel.write("[dim]  e.g., Market Report, Daily SEO Check[/]")
+
+            elif sub == "list":
+                self._load_cron_view()
+                try:
+                    self.query_one("#main-tabs", TabbedContent).active = "tab-cron"
+                except Exception:
+                    pass
+
+            elif sub == "remove":
+                job_id = parts[2] if len(parts) > 2 else ""
+                if not job_id:
+                    panel.write("[dim]Usage: /cron remove <id>[/]")
+                elif cron_engine.remove_cron(job_id.lstrip("#")):
+                    panel.write(f"[yellow]Cron job removed.[/]")
+                    self._load_cron_view()
+                else:
+                    panel.write(f"[red]Job not found: {job_id}[/]")
+
+            elif sub == "on":
+                job_id = parts[2] if len(parts) > 2 else ""
+                if not job_id:
+                    panel.write("[dim]Usage: /cron on <id>[/]")
+                elif cron_engine.enable_cron(job_id.lstrip("#")):
+                    panel.write("[green]Cron job enabled.[/]")
+                    self._load_cron_view()
+                else:
+                    panel.write(f"[red]Job not found: {job_id}[/]")
+
+            elif sub == "off":
+                job_id = parts[2] if len(parts) > 2 else ""
+                if not job_id:
+                    panel.write("[dim]Usage: /cron off <id>[/]")
+                elif cron_engine.disable_cron(job_id.lstrip("#")):
+                    panel.write("[yellow]Cron job disabled.[/]")
+                    self._load_cron_view()
+                else:
+                    panel.write(f"[red]Job not found: {job_id}[/]")
+
+            elif sub == "approve":
+                job_id = parts[2] if len(parts) > 2 else ""
+                if not job_id:
+                    panel.write("[dim]Usage: /cron approve <id>[/]")
+                elif cron_engine.approve_cron(job_id.lstrip("#")):
+                    panel.write("[green]Cron job approved and activated.[/]")
+                    self._load_cron_view()
+                else:
+                    panel.write(f"[red]Job not found or not pending.[/]")
+
+            elif sub == "reject":
+                job_id = parts[2] if len(parts) > 2 else ""
+                if not job_id:
+                    panel.write("[dim]Usage: /cron reject <id>[/]")
+                elif cron_engine.reject_cron(job_id.lstrip("#")):
+                    panel.write("[yellow]Cron job rejected.[/]")
+                    self._load_cron_view()
+                else:
+                    panel.write(f"[red]Job not found or not pending.[/]")
+
+            elif sub == "run":
+                job_id = parts[2] if len(parts) > 2 else ""
+                if not job_id:
+                    panel.write("[dim]Usage: /cron run <id>[/]")
+                else:
+                    import heartbeat as hb
+                    job = cron_engine.run_now(job_id.lstrip("#"))
+                    if job:
+                        hb.add_task(
+                            description=job["description"],
+                            agent=job.get("agent"),
+                            crew=job.get("crew", False),
+                            tags=["cron", f"cron:{job['id']}",
+                                  "report" if job.get("report", True) else "no-report"],
+                        )
+                        panel.write(f"[green]Cron triggered:[/] {job['name']}")
+                        panel.write(f"  Queued for immediate execution.")
+                        self._load_cron_view()
+                    else:
+                        panel.write(f"[red]Job not found: {job_id}[/]")
+
+            else:
+                panel.write("[dim]Usage: /cron [add|list|remove|on|off|run|approve|reject][/]")
+
         elif cmd == "/daemon":
             sub = parts[1].lower() if len(parts) > 1 else "status"
             panel = self.query_one(f"#panel-{self.current_agent}", AgentPanel)
@@ -1898,7 +2269,7 @@ class CrewTUIApp(App):
             return
 
         elif cmd == "/refresh":
-            self._refresh_file_tree()
+            self._refresh_file_list()
             self.notify("Files refreshed")
 
         elif cmd == "/copy":
@@ -1918,7 +2289,7 @@ class CrewTUIApp(App):
                         os.remove(os.path.join(out_dir, f))
                         count += 1
                     panel.write(f"[yellow]Deleted {count} files from output.[/]")
-                    self._refresh_file_tree()
+                    self._refresh_file_list()
                 else:
                     panel.write("[dim]No output directory.[/]")
             else:
@@ -1936,7 +2307,40 @@ class CrewTUIApp(App):
                         return
                 os.remove(filepath)
                 panel.write(f"[yellow]Deleted {os.path.basename(filepath)}[/]")
-                self._refresh_file_tree()
+                self._refresh_file_list()
+
+        elif cmd == "/view":
+            arg = parts[1] if len(parts) > 1 else ""
+            if not arg:
+                panel = self.query_one(f"#panel-{self.current_agent}", AgentPanel)
+                panel.write("[dim]Usage: /view <number> or /view <filename>[/]")
+            elif hasattr(self, '_filtered_files') and self._filtered_files:
+                if arg.isdigit():
+                    idx = int(arg) - 1
+                    if 0 <= idx < len(self._filtered_files):
+                        self._show_file(self._filtered_files[idx])
+                        try:
+                            self.query_one("#main-tabs", TabbedContent).active = "tab-files"
+                        except Exception:
+                            pass
+                    else:
+                        panel = self.query_one(f"#panel-{self.current_agent}", AgentPanel)
+                        panel.write(f"[red]Invalid number. Range: 1-{len(self._filtered_files)}[/]")
+                else:
+                    # Match by partial name
+                    matches = [f for f in self._filtered_files if arg.lower() in f.lower()]
+                    if len(matches) == 1:
+                        self._show_file(matches[0])
+                        try:
+                            self.query_one("#main-tabs", TabbedContent).active = "tab-files"
+                        except Exception:
+                            pass
+                    elif len(matches) > 1:
+                        panel = self.query_one(f"#panel-{self.current_agent}", AgentPanel)
+                        panel.write(f"[yellow]Multiple matches: {', '.join(m[:30] for m in matches[:5])}[/]")
+                    else:
+                        panel = self.query_one(f"#panel-{self.current_agent}", AgentPanel)
+                        panel.write(f"[red]No file matching: {arg}[/]")
 
         elif cmd == "/purge":
             out_dir = _output_dir()
@@ -1948,7 +2352,7 @@ class CrewTUIApp(App):
                     if os.path.isfile(fp):
                         os.remove(fp)
                 panel.write(f"[yellow]Purged {count} files.[/]")
-                self._refresh_file_tree()
+                self._refresh_file_list()
             else:
                 panel.write("[dim]No output directory.[/]")
 

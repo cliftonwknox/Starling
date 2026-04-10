@@ -159,6 +159,14 @@ def create_command_handler(app=None):
                 return _cmd_queue()
             elif command == "agents":
                 return _cmd_agents()
+            elif command == "crons":
+                return _cmd_crons()
+            elif command == "approve":
+                return _cmd_approve(args)
+            elif command == "reject":
+                return _cmd_reject(args)
+            elif command == "runcron":
+                return _cmd_runcron(args)
             elif command == "help" or command == "start":
                 return _cmd_help()
             else:
@@ -291,6 +299,70 @@ def _cmd_agents() -> str:
         return f"Error: {e}"
 
 
+def _cmd_crons() -> str:
+    """List scheduled cron jobs."""
+    import cron_engine
+    jobs = cron_engine.list_crons()
+    if not jobs:
+        return "No cron jobs configured."
+    lines = ["*Scheduled Cron Jobs*\n"]
+    for j in jobs:
+        status = j["status"].upper()
+        next_run = j.get("next_run", "?")[:16] if j.get("next_run") else "—"
+        last_run = j.get("last_run", "—")[:16] if j.get("last_run") else "never"
+        lines.append(
+            f"#{j['id'][-6:]} *{j['name']}*\n"
+            f"  {status} | {j['schedule']}\n"
+            f"  {j['description'][:80]}\n"
+            f"  Last: {last_run} | Next: {next_run}\n"
+        )
+    return "\n".join(lines)
+
+
+def _cmd_approve(args: str) -> str:
+    """Approve a pending cron job."""
+    if not args.strip():
+        return "Usage: /approve <job-id>"
+    import cron_engine
+    job_id = args.strip().lstrip("#")
+    if cron_engine.approve_cron(job_id):
+        job = cron_engine.get_cron(job_id)
+        name = job["name"] if job else "?"
+        return f"Cron job approved: {name}\nIt will run on schedule."
+    return "Job not found or not pending approval."
+
+
+def _cmd_reject(args: str) -> str:
+    """Reject a pending cron job."""
+    if not args.strip():
+        return "Usage: /reject <job-id>"
+    import cron_engine
+    job_id = args.strip().lstrip("#")
+    if cron_engine.reject_cron(job_id):
+        return "Cron job rejected."
+    return "Job not found or not pending approval."
+
+
+def _cmd_runcron(args: str) -> str:
+    """Manually trigger a cron job."""
+    if not args.strip():
+        return "Usage: /runcron <job-id>"
+    import cron_engine
+    import heartbeat as hb
+    job_id = args.strip().lstrip("#")
+    job = cron_engine.run_now(job_id)
+    if not job:
+        return "Cron job not found."
+    hb.add_task(
+        description=job["description"],
+        agent=job.get("agent"),
+        crew=job.get("crew", False),
+        tags=["cron", f"cron:{job['id']}",
+              "report" if job.get("report", True) else "no-report"],
+    )
+    return f"Cron triggered: {job['name']}\nQueued for immediate execution."
+
+
 def _cmd_help() -> str:
     """Show help text."""
     return (
@@ -302,6 +374,9 @@ def _cmd_help() -> str:
         "/history — Recent crew run history\n"
         "/queue — Show task queue\n"
         "/agents — List configured agents\n"
+        "/crons — List scheduled cron jobs\n"
+        "/approve <id> — Approve a pending cron job\n"
+        "/reject <id> — Reject a pending cron job\n"
         "/help — This message\n\n"
         "_Or just send a message to queue it as a crew mission._"
     )

@@ -61,15 +61,95 @@ class TavilySearchTool(BaseTool):
             return f"Tavily error: {e}"
 
 
+class CronTool(BaseTool):
+    name: str = "Cron Scheduler"
+    description: str = (
+        "Create and manage scheduled cron jobs. "
+        "Actions: create_cron <name> | <schedule> | <mission description>, "
+        "list_crons, remove_cron <id>, run_cron <id>. "
+        "Schedules: 'daily 08:00', 'weekly mon 9:00', 'every 6h', 'hourly'. "
+        "Created jobs require user approval before activation."
+    )
+
+    def _run(self, query: str) -> str:
+        import cron_engine
+        parts = query.strip().split(maxsplit=1)
+        action = parts[0].lower() if parts else ""
+        args = parts[1] if len(parts) > 1 else ""
+
+        if action == "create_cron":
+            fields = [f.strip() for f in args.split("|")]
+            if len(fields) < 3:
+                return "Format: create_cron <name> | <schedule> | <mission description>"
+            name, schedule, description = fields[0], fields[1], fields[2]
+            try:
+                job = cron_engine.add_cron(
+                    name=name, description=description, schedule=schedule,
+                    crew=True, created_by="agent", require_approval=True,
+                )
+                # Notify user for approval
+                try:
+                    import telegram_notify as tg
+                    short_id = job["id"][-6:]
+                    tg.send_message(
+                        f"*Cron Proposed by Agent*\n\n"
+                        f"*Name:* {name}\n"
+                        f"*Schedule:* {schedule}\n"
+                        f"*Mission:* {description}\n\n"
+                        f"Reply /approve {short_id} or /reject {short_id}"
+                    )
+                except Exception:
+                    pass
+                return f"Cron job '{name}' created (pending approval). ID: #{job['id'][-6:]}"
+            except ValueError as e:
+                return f"Error: {e}"
+
+        elif action == "list_crons":
+            jobs = cron_engine.list_crons()
+            if not jobs:
+                return "No cron jobs configured."
+            lines = []
+            for j in jobs:
+                lines.append(
+                    f"#{j['id'][-6:]} [{j['status']}] {j['name']} — "
+                    f"{j['schedule']} — {j['description'][:60]}"
+                )
+            return "\n".join(lines)
+
+        elif action == "remove_cron":
+            if cron_engine.remove_cron(args.strip()):
+                return f"Cron job removed."
+            return "Job not found."
+
+        elif action == "run_cron":
+            job_id = args.strip().lstrip("#")
+            job = cron_engine.run_now(job_id)
+            if not job:
+                return f"Cron job not found: {job_id}"
+            import heartbeat as hb
+            hb.add_task(
+                description=job["description"],
+                agent=job.get("agent"),
+                crew=job.get("crew", False),
+                tags=["cron", f"cron:{job['id']}",
+                      "report" if job.get("report", True) else "no-report"],
+            )
+            return f"Cron job '{job['name']}' triggered. It has been queued for execution."
+
+        return "Unknown action. Use: create_cron, list_crons, remove_cron, run_cron"
+
+
 # Built-in tool instances
 _ddg_search = DDGSearchTool()
 _tavily_search = TavilySearchTool()
 _scrape_website = ScrapeWebsiteTool()
+_cron_tool = CronTool()
 
 BUILTIN_TOOLS = {
     "ddg_search": {"instance": _ddg_search, "description": "DuckDuckGo web search (free, no key)"},
     "tavily_search": {"instance": _tavily_search, "description": "Tavily AI search (needs TAVILY_API_KEY)"},
     "scrape_website": {"instance": _scrape_website, "description": "Scrape any URL"},
+    "cron_tool": {"instance": _cron_tool, "description": "Create and manage scheduled cron jobs"},
 }
 
 

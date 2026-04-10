@@ -402,9 +402,11 @@ class Heartbeat:
             else:
                 result = f"No executor configured. Task: {task['description']}"
 
-            # Save output to file
+            # Save output to file (skip if tagged no-report)
             result_str = str(result)[:5000] if result else "No output"
-            output_file = save_task_output(task, result_str)
+            output_file = None
+            if "no-report" not in task.get("tags", []):
+                output_file = save_task_output(task, result_str)
 
             update_task(
                 task["id"],
