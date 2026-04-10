@@ -1051,6 +1051,14 @@ class CrewTUIApp(App):
                     self.query_one("#model-key-input", Input).value = p.get("api_key_env", "") or ""
                     self.query_one("#model-provider-input", Input).value = p.get("provider", "")
                     self.query_one("#model-format-select", Select).value = p.get("api_format", "openai")
+                    # Hint for local models
+                    provider = p.get("provider", "").lower()
+                    if provider in ("lm studio", "ollama"):
+                        label = "LM Studio" if "lm studio" in provider else "Ollama"
+                        self.notify(
+                            f"Set Model ID to the model loaded in {label}, then Save",
+                            severity="information",
+                        )
                 return
         except Exception:
             pass
@@ -1102,6 +1110,14 @@ class CrewTUIApp(App):
                     self.query_one("#model-key-input", Input).value = p.get("api_key_env", "") or ""
                     self.query_one("#model-provider-input", Input).value = p.get("provider", "")
                     self.query_one("#model-format-select", Select).value = p.get("api_format", "openai")
+                    # Hint for local models
+                    provider = p.get("provider", "").lower()
+                    if provider in ("lm studio", "ollama"):
+                        label = "LM Studio" if "lm studio" in provider else "Ollama"
+                        self.notify(
+                            f"Set Model ID to the model loaded in {label}, then Save",
+                            severity="information",
+                        )
                 except Exception:
                     pass
 
