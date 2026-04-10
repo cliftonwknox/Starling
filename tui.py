@@ -388,6 +388,14 @@ class CrewTUIApp(App):
         padding: 0 1;
         height: 1;
     }
+    #model-new-bar {
+        height: 3;
+        margin: 0 0 1 0;
+    }
+    #agent-new-bar {
+        height: 3;
+        margin: 0 0 1 0;
+    }
     #agent-btn-bar {
         height: 3;
         margin: 1 0;
@@ -526,13 +534,17 @@ class CrewTUIApp(App):
                     with VerticalScroll(id="models-form-area"):
                         # Model preset form
                         yield Static("[bold cyan]Model Preset[/]", id="models-form-header")
-                        yield Static("[dim]Use existing preset:[/]")
+                        yield Horizontal(
+                            Button("New Model", id="model-new-btn", variant="primary"),
+                            Static("  [dim]or select a preset to edit:[/]"),
+                            id="model-new-bar",
+                        )
                         yield Select(
                             [(f"{k} — {v['label']}", k) for k, v in _load_model_presets().items()],
-                            prompt="Select a preset to copy...",
+                            prompt="Load existing preset...",
                             id="model-preset-select",
                         )
-                        yield Static("[dim]Or configure manually:[/]")
+                        yield Rule()
                         yield Static("Preset Name")
                         yield Input(placeholder="e.g., my-grok, deepseek", id="model-name-input")
                         yield Static("Display Label")
@@ -546,13 +558,18 @@ class CrewTUIApp(App):
                         yield Static("Provider")
                         yield Input(placeholder="e.g., DeepSeek, Local, xAI", id="model-provider-input")
                         yield Horizontal(
-                            Button("Test Model", id="model-test-btn", variant="default"),
-                            Button("Save Model", id="model-save-btn", variant="success"),
+                            Button("Test", id="model-test-btn", variant="default"),
+                            Button("Save", id="model-save-btn", variant="success"),
+                            Button("Delete", id="model-delete-btn", variant="error"),
                             id="models-btn-bar",
                         )
                         yield Rule()
                         # Agent form
-                        yield Static("[bold cyan]Add / Edit Agent[/]")
+                        yield Horizontal(
+                            Static("[bold cyan]Agent[/]  "),
+                            Button("New Agent", id="agent-new-btn", variant="primary"),
+                            id="agent-new-bar",
+                        )
                         yield Static("Agent ID")
                         yield Input(placeholder="e.g., researcher, writer (no spaces)", id="agent-id-input")
                         yield Static("Display Name")
@@ -1064,10 +1081,16 @@ class CrewTUIApp(App):
             self._test_model_preset()
         elif event.button.id == "model-save-btn":
             self._save_model_preset()
+        elif event.button.id == "model-delete-btn":
+            self._delete_model_preset()
+        elif event.button.id == "model-new-btn":
+            self._clear_model_form()
         elif event.button.id == "agent-save-btn":
             self._save_agent()
         elif event.button.id == "agent-delete-btn":
             self._delete_agent()
+        elif event.button.id == "agent-new-btn":
+            self._clear_agent_form()
 
     def _get_model_form(self) -> dict:
         """Read current values from the model form."""
@@ -1135,6 +1158,72 @@ class CrewTUIApp(App):
 
         threading.Thread(target=_do_test, daemon=True).start()
 
+    def _clear_model_form(self):
+        """Clear model form fields for a new model."""
+        try:
+            self.query_one("#model-name-input", Input).value = ""
+            self.query_one("#model-label-input", Input).value = ""
+            self.query_one("#model-id-input", Input).value = ""
+            self.query_one("#model-url-input", Input).value = ""
+            self.query_one("#model-key-input", Input).value = ""
+            self.query_one("#model-provider-input", Input).value = ""
+            log = self.query_one("#model-result-log", RichLog)
+            log.clear()
+            log.write("[dim]Fill in the fields below to add a new model preset.[/]")
+        except Exception:
+            pass
+
+    def _clear_agent_form(self):
+        """Clear agent form fields for a new agent."""
+        try:
+            self.query_one("#agent-id-input", Input).value = ""
+            self.query_one("#agent-name-input", Input).value = ""
+            self.query_one("#agent-role-input", Input).value = ""
+            self.query_one("#agent-goal-input", Input).value = ""
+            self.query_one("#agent-backstory-input", Input).value = ""
+            self.query_one("#agent-tools-input", Input).value = ""
+            self.query_one("#agent-keywords-input", Input).value = ""
+            log = self.query_one("#model-result-log", RichLog)
+            log.clear()
+            log.write("[dim]Fill in the fields below to add a new agent.[/]")
+        except Exception:
+            pass
+
+    def _delete_model_preset(self):
+        """Delete a custom model preset (built-ins cannot be deleted)."""
+        log = self.query_one("#model-result-log", RichLog)
+        log.clear()
+        form = self._get_model_form()
+        name = form["name"]
+
+        if not name:
+            log.write("[red]No preset name specified.[/]")
+            return
+
+        from model_wizard import BUILTIN_PRESETS
+        if name in BUILTIN_PRESETS:
+            log.write(f"[red]Cannot delete built-in preset '{name}'.[/]")
+            return
+
+        # Check if any agent uses this preset
+        users = [a["name"] for a in self._agents_cfg if a.get("preset") == name]
+        if users:
+            log.write(f"[red]Cannot delete — used by: {', '.join(users)}[/]")
+            log.write("[dim]Reassign those agents first.[/]")
+            return
+
+        from model_wizard import load_presets, save_custom_presets
+        presets = load_presets()
+        if name not in presets:
+            log.write(f"[red]Preset '{name}' not found.[/]")
+            return
+
+        del presets[name]
+        save_custom_presets(presets)
+        self._clear_model_form()
+        self._load_models_list()
+        log.write(f"[yellow]Preset '{name}' deleted.[/]")
+
     def _save_model_preset(self):
         """Save the model preset and optionally assign to agent."""
         log = self.query_one("#model-result-log", RichLog)
@@ -1150,6 +1239,12 @@ class CrewTUIApp(App):
 
         from model_wizard import load_presets, save_custom_presets
         presets = load_presets()
+        # Limit to 10 custom presets (built-ins don't count)
+        from model_wizard import BUILTIN_PRESETS
+        custom_count = sum(1 for k in presets if k not in BUILTIN_PRESETS)
+        if form["name"] not in presets and custom_count >= 10:
+            log.write("[red]Maximum 10 custom model presets reached. Delete one first.[/]")
+            return
         presets[form["name"]] = {
             "label": form["label"] or form["name"],
             "model": form["model"],
