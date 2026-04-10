@@ -361,15 +361,9 @@ def _get_out_dir():
 
 
 def _out(filename: str) -> str:
-    """Return output path. CrewAI prepends CWD to output_file, so if our
-    output dir is absolute, we need to make it relative to CWD."""
-    out_dir = _get_out_dir()
-    full_path = os.path.join(out_dir, filename)
-    # Make relative to CWD so CrewAI doesn't double the path
-    try:
-        return os.path.relpath(full_path)
-    except ValueError:
-        return full_path
+    """Return output filename only. We chdir to the output dir before kickoff
+    so CrewAI writes files there without path traversal issues."""
+    return filename
 
 
 def _generate_mission_tasks(mission: str, agents: dict, agents_cfg: list) -> list:

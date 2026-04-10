@@ -310,14 +310,9 @@ class CrewTUIApp(App):
         text-align: center;
         padding: 4;
     }
-    #activity-bar {
-        dock: bottom;
-        height: 1;
-        background: $primary-background;
-        padding: 0 1;
-    }
-    #activity-bar.idle {
-        display: none;
+    #status-log {
+        height: 1fr;
+        padding: 1;
     }
     """
 
@@ -340,6 +335,8 @@ class CrewTUIApp(App):
         self._role_to_id = {}
         self.current_agent = ""
         self.crew_running = False
+        self._crew_start_time = None
+        self._active_agent_name = ""
         self._components = None
         self._heartbeat = None
 
@@ -401,12 +398,13 @@ class CrewTUIApp(App):
                 yield RichLog(id="queue-log", highlight=True, markup=True, wrap=True)
             with TabPane("Skills", id="tab-skills"):
                 yield RichLog(id="skills-log", highlight=True, markup=True, wrap=True)
+            with TabPane("Status", id="tab-status"):
+                yield RichLog(id="status-log", highlight=True, markup=True, wrap=True)
 
         first_agent = self._agents_cfg[0] if self._agents_cfg else None
         first_color = first_agent.get("color", "cyan") if first_agent else "cyan"
         first_name = first_agent.get("name", "?") if first_agent else "?"
 
-        yield Static("", id="activity-bar", classes="idle")
         with Horizontal(id="prompt-bar"):
             yield Static(f"[bold {first_color}]{first_name}[/] > ", id="agent-select")
             yield Input(
@@ -444,6 +442,7 @@ class CrewTUIApp(App):
         self._load_config_view()
         self._load_queue_view()
         self._load_skills_view()
+        self._update_status_tab()
 
         # Auto-start heartbeat if configured
         import heartbeat as hb
@@ -455,46 +454,101 @@ class CrewTUIApp(App):
             self.notify("Heartbeat auto-started")
             self._load_queue_view()
 
+    def _log_status(self, text: str):
+        """Append a line to the Status tab log."""
+        try:
+            log = self.query_one("#status-log", RichLog)
+            log.write(text)
+        except Exception:
+            pass
+
     def _show_activity(self, text: str):
-        """Show the activity bar with a message."""
-        bar = self.query_one("#activity-bar", Static)
-        bar.update(text)
-        bar.remove_class("idle")
+        """Log activity to Status tab."""
+        self._log_status(text)
 
     def _hide_activity(self):
-        """Hide the activity bar."""
-        bar = self.query_one("#activity-bar", Static)
-        bar.add_class("idle")
+        """Log idle state to Status tab."""
+        pass
 
-    def _update_activity(self):
-        """Update activity bar based on current state."""
+    def _update_status_tab(self):
+        """Full refresh of the Status tab with current state."""
+        try:
+            log = self.query_one("#status-log", RichLog)
+            log.clear()
+        except Exception:
+            return
+
         if self.crew_running:
-            # Build status from agent panels
-            working = []
+            elapsed = int((datetime.now() - self._crew_start_time).total_seconds()) if self._crew_start_time else 0
+            mins = elapsed // 60
+            secs = elapsed % 60
+            time_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+
+            # Progress bar
+            bar_width = 40
+            # Estimate progress based on agent count (rough)
+            progress = min(elapsed / max(len(self._agent_ids) * 60, 1), 0.95)
+            filled = int(bar_width * progress)
+            bar = "[bold yellow]" + "#" * filled + "[/][dim]" + "-" * (bar_width - filled) + "[/]"
+
+            log.write(f"[bold yellow]CREW RUNNING[/]  {time_str} elapsed\n")
+            log.write(f"  [{bar}]\n")
+            log.write("")
+
+            # Agent statuses
+            log.write("[bold]Agent Status:[/]")
             for a in self._agents_cfg:
-                try:
-                    panel = self.query_one(f"#panel-{a['id']}", AgentPanel)
-                    status_widget = self.query_one(f"#status-{a['id']}", Static)
-                    rendered = status_widget.render()
-                    text = str(rendered)
-                    if "working" in text or "thinking" in text or "waiting" in text:
-                        working.append(a["name"])
-                except Exception:
-                    pass
-            if working:
-                dots = "." * (int(datetime.now().timestamp()) % 4)
-                self._show_activity(f"[bold yellow]CREW RUNNING[/] | Active: {', '.join(working)}{dots}")
-            else:
-                dots = "." * (int(datetime.now().timestamp()) % 4)
-                self._show_activity(f"[bold yellow]CREW RUNNING{dots}[/]")
+                aid = a["id"]
+                name = a["name"]
+                color = a.get("color", "white")
+                if self._active_agent_name == name:
+                    status = f"[bold yellow]WORKING...[/]"
+                    indicator = "[bold yellow]>>>[/]"
+                else:
+                    # Check if this agent has completed
+                    try:
+                        panel = self.query_one(f"#panel-{aid}", AgentPanel)
+                        status_w = self.query_one(f"#status-{aid}", Static)
+                        rendered = str(status_w.render())
+                        if "done" in rendered:
+                            status = "[bold green]DONE[/]"
+                            indicator = "[green]OK[/] "
+                        elif "error" in rendered:
+                            status = "[bold red]ERROR[/]"
+                            indicator = "[red]!![/] "
+                        elif "working" in rendered:
+                            status = "[bold yellow]WORKING...[/]"
+                            indicator = "[bold yellow]>>>[/]"
+                        elif "waiting" in rendered:
+                            status = "[dim]WAITING[/]"
+                            indicator = "[dim]...[/]"
+                        else:
+                            status = "[dim]IDLE[/]"
+                            indicator = "[dim]  [/] "
+                    except Exception:
+                        status = "[dim]IDLE[/]"
+                        indicator = "[dim]  [/] "
+                preset = a.get("preset", "?")
+                log.write(f"  {indicator} [{color}]{name:20s}[/] {status}  [dim]({preset})[/]")
+
         elif self._heartbeat and self._heartbeat.running:
             st = self._heartbeat.status()
-            if st["active"] > 0:
-                self._show_activity(f"[bold cyan]HEARTBEAT[/] | Processing task{' ' * (int(datetime.now().timestamp()) % 3)}")
-            else:
-                self._show_activity(f"[dim]HEARTBEAT IDLE[/] | Pending: {st['pending']}")
+            log.write(f"[bold cyan]HEARTBEAT ACTIVE[/]\n")
+            log.write(f"  Interval: {st['interval']}s")
+            log.write(f"  Processed: {st['tasks_processed']}")
+            log.write(f"  Pending: {st['pending']}")
+            log.write(f"  Active: {st['active']}")
+            if st["started_at"]:
+                log.write(f"  Started: {st['started_at'][:19]}")
         else:
-            self._hide_activity()
+            log.write("[dim]No crew running. No heartbeat active.[/]\n")
+            log.write("")
+            log.write("[bold]Agents:[/]")
+            for a in self._agents_cfg:
+                color = a.get("color", "white")
+                preset = a.get("preset", "?")
+                tools = len(a.get("tools", []))
+                log.write(f"  [{color}]{a['name']:20s}[/] [dim]{preset} | {tools} tools[/]")
 
     def _ensure_components(self):
         if self._components is None:
@@ -765,7 +819,12 @@ class CrewTUIApp(App):
         crew.step_callback = step_callback
         crew.task_callback = task_callback
 
-        result = crew.kickoff()
+        original_cwd = os.getcwd()
+        os.chdir(out_dir)
+        try:
+            result = crew.kickoff()
+        finally:
+            os.chdir(original_cwd)
         result_text = str(result) if result else "No output"
 
         save_history({
@@ -802,6 +861,14 @@ class CrewTUIApp(App):
             pass
 
     # === File viewer ===
+
+    def _refresh_file_tree(self):
+        """Reload the directory tree in the Files tab."""
+        try:
+            tree = self.query_one("#file-tree", DirectoryTree)
+            tree.reload()
+        except Exception:
+            pass
 
     def on_directory_tree_file_selected(self, event: DirectoryTree.FileSelected) -> None:
         viewer = self.query_one("#file-viewer", RichLog)
@@ -840,6 +907,7 @@ class CrewTUIApp(App):
             for aid in self._agent_ids:
                 panel = self.query_one(f"#panel-{aid}", AgentPanel)
                 panel.set_status("[bold green]done[/]")
+            self._refresh_file_tree()
             threading.Thread(target=self._send_telegram_complete,
                              args=(message.mission, message.duration, message.output_files), daemon=True).start()
         else:
@@ -977,10 +1045,14 @@ class CrewTUIApp(App):
             self.notify("Crew flag was stuck — reset. Try again.", severity="warning")
             return
         self.crew_running = True
+        self._crew_start_time = datetime.now()
         label = mission[:50] + "..." if mission and len(mission) > 50 else (mission or "default tasks")
         self.notify(f"Starting crew: {label}")
-        self._show_activity(f"[bold yellow]CREW STARTING:[/] {label}")
-        self.set_interval(2, self._update_activity, name="activity-pulse")
+        self.set_interval(2, self._update_status_tab, name="activity-pulse")
+        try:
+            self.query_one("#main-tabs", TabbedContent).active = "tab-status"
+        except Exception:
+            pass
         for aid in self._agent_ids:
             panel = self.query_one(f"#panel-{aid}", AgentPanel)
             panel.clear()
@@ -1012,6 +1084,7 @@ class CrewTUIApp(App):
             def _resolve_agent_id(agent_ref):
                 """Resolve an agent reference from a callback to our agent_id."""
                 if agent_ref is None:
+                    logger.info("Callback agent_ref is None, defaulting to first agent")
                     return self._agent_ids[0] if self._agent_ids else ""
                 # Try object identity first
                 obj_id = id(agent_ref)
@@ -1025,6 +1098,7 @@ class CrewTUIApp(App):
                 for role, aid in self._role_to_id.items():
                     if role.lower() in role_name.lower() or role_name.lower() in role.lower():
                         return aid
+                logger.info(f"Could not resolve agent: role='{role_name}', falling back to first agent")
                 logger.info(f"Could not resolve agent: role={role_name}")
                 return self._agent_ids[0] if self._agent_ids else ""
 
@@ -1034,6 +1108,9 @@ class CrewTUIApp(App):
                 output_text = str(getattr(step_output, 'output', step_output))
                 if len(output_text) > 500:
                     output_text = output_text[:500] + "..."
+                # Track active agent for activity bar
+                agent_cfg = next((a for a in self._agents_cfg if a["id"] == agent_id), None)
+                self._active_agent_name = agent_cfg["name"] if agent_cfg else agent_id
                 self.post_message(AgentStatus(agent_id, "[bold yellow]working...[/]"))
                 self.post_message(AgentOutput(agent_id, f"[dim]Step:[/] {output_text}"))
 
@@ -1048,8 +1125,14 @@ class CrewTUIApp(App):
 
             crew.step_callback = step_callback
             crew.task_callback = task_callback
-            logger.info("Crew kickoff starting...")
-            crew.kickoff()
+            # chdir to output dir so CrewAI writes files there
+            original_cwd = os.getcwd()
+            os.chdir(out_dir)
+            logger.info(f"Crew kickoff starting (cwd={out_dir})...")
+            try:
+                crew.kickoff()
+            finally:
+                os.chdir(original_cwd)
             logger.info("Crew kickoff completed")
 
             duration = int((datetime.now() - start_time).total_seconds())
@@ -1627,6 +1710,19 @@ class CrewTUIApp(App):
             else:
                 panel.write("[dim]Usage: /telegram [show|test|on|off][/]")
 
+        elif cmd in ("/exit", "/quit", "/q"):
+            if self.crew_running:
+                self.crew_running = False
+                self._hide_activity()
+            if self._heartbeat and self._heartbeat.running:
+                self._heartbeat.stop()
+            self.exit()
+            return
+
+        elif cmd == "/refresh":
+            self._refresh_file_tree()
+            self.notify("Files refreshed")
+
         elif cmd == "/copy":
             self.action_copy_panel()
 
@@ -1644,6 +1740,7 @@ class CrewTUIApp(App):
                         os.remove(os.path.join(out_dir, f))
                         count += 1
                     panel.write(f"[yellow]Deleted {count} files from output.[/]")
+                    self._refresh_file_tree()
                 else:
                     panel.write("[dim]No output directory.[/]")
             else:
@@ -1661,6 +1758,7 @@ class CrewTUIApp(App):
                         return
                 os.remove(filepath)
                 panel.write(f"[yellow]Deleted {os.path.basename(filepath)}[/]")
+                self._refresh_file_tree()
 
         elif cmd == "/status":
             panel = self.query_one(f"#panel-{self.current_agent}", AgentPanel)
