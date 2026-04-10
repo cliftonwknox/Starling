@@ -108,7 +108,7 @@ HELP_TEXT = """[bold]Commands:[/]
   [cyan]/skills[/] refresh       — Rescan skills directory
   [cyan]/cron[/] add              — Add a scheduled job (wizard)
   [cyan]/cron[/] list             — Show all cron jobs
-  [cyan]/cron[/] remove <id>     — Delete a cron job
+  [cyan]/cron[/] remove|delete <id> — Delete a cron job
   [cyan]/cron[/] on/off <id>     — Enable/disable a cron job
   [cyan]/cron[/] approve <id>    — Approve agent-proposed job
   [cyan]/cron[/] reject <id>     — Reject agent-proposed job
@@ -2891,10 +2891,10 @@ class CrewTUIApp(App):
                 except Exception:
                     pass
 
-            elif sub == "remove":
+            elif sub in ("remove", "delete"):
                 job_id = parts[2] if len(parts) > 2 else ""
                 if not job_id:
-                    panel.write("[dim]Usage: /cron remove <id>[/]")
+                    self.notify("Usage: /cron remove <id>", severity="warning")
                 elif cron_engine.remove_cron(job_id.lstrip("#")):
                     self._load_cron_view()
                     try:
@@ -2903,7 +2903,7 @@ class CrewTUIApp(App):
                         pass
                     self.notify(f"Cron job #{job_id.lstrip('#')} removed", severity="information")
                 else:
-                    panel.write(f"[red]Job not found: {job_id}[/]")
+                    self.notify(f"Job not found: {job_id}", severity="error")
 
             elif sub == "on":
                 job_id = parts[2] if len(parts) > 2 else ""
@@ -2967,7 +2967,7 @@ class CrewTUIApp(App):
                         panel.write(f"[red]Job not found: {job_id}[/]")
 
             else:
-                panel.write("[dim]Usage: /cron [add|list|remove|on|off|run|approve|reject][/]")
+                panel.write("[dim]Usage: /cron [add|list|remove|delete|on|off|run|approve|reject][/]")
 
         elif cmd == "/daemon":
             sub = parts[1].lower() if len(parts) > 1 else "status"

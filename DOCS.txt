@@ -86,7 +86,7 @@ Heartbeat:
 Cron:
   /cron add                  Start the cron job wizard
   /cron list                 Show all scheduled jobs
-  /cron remove <id>          Delete a cron job
+  /cron remove|delete <id>   Delete a cron job
   /cron on <id>              Enable a cron job
   /cron off <id>             Disable a cron job
   /cron run <id>             Trigger a cron job immediately
