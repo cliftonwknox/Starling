@@ -3413,7 +3413,7 @@ wheels = [
 
 [[package]]
 name = "starling"
-version = "1.1.0a0"
+version = "1.2.0a0"
 source = { virtual = "." }
 dependencies = [
     { name = "crewai", extra = ["litellm", "tools"] },

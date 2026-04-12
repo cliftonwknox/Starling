@@ -1,12 +1,118 @@
-"""Starling Setup Wizard — Interactive first-run configuration."""
+"""Starling Setup Wizard — Interactive first-run configuration.
+
+Entry points:
+    run_setup()   — CLI entry; pre-start menu → path picker → dispatch
+    _run_full_wizard()  — Advanced path (the original full flow)
+    _run_quick_start()  — Quick Start path (5 steps, template-based, 1 agent)
+    _run_team_setup()   — Team Setup path (delegates to full wizard for now)
+
+Navigation sentinels (returned by step functions):
+    _BACK  — user wants to go back to the previous step
+    _SKIP  — user wants to skip this step (only when field is skippable)
+    _QUIT  — user wants to exit the wizard
+"""
 
 import os
 import json
 import sys
 import readline  # enables line editing, history, and arrow keys in input()
 
+import theme
+
 COLORS = ["cyan", "green", "yellow", "magenta", "blue", "red", "white", "orange"]
 MAX_AGENTS = 10
+
+# Navigation sentinels — objects, not strings, so no collision with user input
+_BACK = object()
+_SKIP = object()
+_QUIT = object()
+_DONE = object()  # signals "another wizard path completed successfully — exit quietly"
+
+
+def _nav_hint(skippable: bool = False) -> str:
+    """Return the standard navigation hint line."""
+    parts = ["Enter = next", "b = back", "q = quit"]
+    if skippable:
+        parts.insert(2, "s = skip")
+    return theme.color("  (" + " | ".join(parts) + ")", "muted")
+
+
+def _prompt_nav(label: str, default: str = "", hint: str = "", skippable: bool = False,
+                required: bool = False):
+    """Prompt with nav support. Returns the user's value, or a sentinel.
+
+    Returns:
+        - str: the user's answer (possibly default)
+        - _BACK: user typed 'b' (or variants) — caller should pop state
+        - _SKIP: user typed 's' — only if skippable=True, else treated as text
+        - _QUIT: user typed 'q' and confirmed
+    """
+    while True:
+        prompt = theme.prompt_text(label, default=default, hint=hint)
+        try:
+            raw = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return _QUIT
+
+        low = raw.lower()
+        if low == "b":
+            return _BACK
+        if low == "q":
+            # Confirm quit
+            try:
+                confirm = input(theme.color("  Quit without saving? [y/N]: ", "warning")).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return _QUIT
+            if confirm == "y":
+                return _QUIT
+            continue  # re-prompt
+        if low == "s" and skippable:
+            return _SKIP
+
+        # Normal answer path
+        if not raw and default:
+            return default
+        if required and not raw:
+            theme.error("This field is required.")
+            continue
+        return raw
+
+
+def _pick_option(label: str, options: list, default_index: int = 0,
+                 skippable: bool = False) -> object:
+    """Numbered option picker with nav support.
+
+    Args:
+        label: Prompt label (shown above the options).
+        options: List of (display_name, value) tuples OR plain strings.
+        default_index: 0-based index of the default option.
+        skippable: Whether 's' skip is allowed.
+
+    Returns:
+        The selected value (second element of tuple, or the string if list of strings),
+        or _BACK/_SKIP/_QUIT sentinel.
+    """
+    # Normalize to (display, value) tuples
+    norm = [(o, o) if isinstance(o, str) else o for o in options]
+
+    while True:
+        print()
+        for i, (disp, _) in enumerate(norm, 1):
+            marker = theme.color("  *", "accent") if (i - 1) == default_index else ""
+            print(f"    {theme.color(str(i), 'highlight')}) {disp}{marker}")
+
+        default_str = str(default_index + 1) if norm else ""
+        raw = _prompt_nav(label, default=default_str, skippable=skippable)
+        if raw in (_BACK, _SKIP, _QUIT):
+            return raw
+        try:
+            idx = int(raw) - 1
+            if 0 <= idx < len(norm):
+                return norm[idx][1]
+        except (ValueError, TypeError):
+            pass
+        theme.error(f"Pick a number 1-{len(norm)}.")
 
 
 def _contains_manager(value: str) -> bool:
@@ -105,7 +211,499 @@ def _banner(title):
 
 
 def run_setup():
-    """Main setup wizard entry point."""
+    """Main setup wizard entry point — pre-start menu → path picker → dispatch."""
+    theme.clear_screen()
+    theme.banner("Starling Setup")
+    print(f"  {theme.color('Welcome to Starling', 'primary', bold=True)} — let's get your crew configured.\n")
+
+    # Pre-start menu
+    while True:
+        print("  How would you like to start?\n")
+        print(f"    {theme.color('1', 'highlight')}) New project")
+        print(f"    {theme.color('2', 'highlight')}) Import existing config {theme.color('(not yet implemented)', 'muted')}")
+        print(f"    {theme.color('3', 'highlight')}) Quit")
+        try:
+            choice = input(theme.color("\n  Choice [1]: ", "highlight")).strip() or "1"
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if choice == "1":
+            break
+        elif choice == "2":
+            theme.warn("Import is not yet implemented. Coming in a future release.")
+            continue
+        elif choice == "3":
+            print()
+            return
+        else:
+            theme.error("Invalid choice. Pick 1, 2, or 3.")
+
+    # Path picker
+    theme.clear_screen()
+    theme.banner("Pick your setup path")
+    print(f"    {theme.color('1', 'highlight')}) {theme.color('Quick start', 'accent', bold=True)}  — 1 agent, template-based (~5 prompts, ~1 min)")
+    print(f"    {theme.color('2', 'highlight')}) {theme.color('Team setup', 'accent', bold=True)}   — multiple agents with templates")
+    print(f"    {theme.color('3', 'highlight')}) {theme.color('Advanced', 'accent', bold=True)}     — full control over every field")
+
+    while True:
+        try:
+            choice = input(theme.color("\n  Choice [1]: ", "highlight")).strip() or "1"
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if choice == "1":
+            _run_quick_start()
+            return
+        elif choice == "2":
+            _run_team_setup()
+            return
+        elif choice == "3":
+            _run_full_wizard()
+            return
+        else:
+            theme.error("Invalid choice. Pick 1, 2, or 3.")
+
+
+def _run_quick_start():
+    """Quick Start flow — 5 steps, template-based, single agent.
+
+    Flow:
+        1. Project name
+        2. Pick template
+        3. Pick model
+        4. API key (if needed and not set)
+        5. Confirm + launch
+    """
+    # State — dict that accumulates answers. Back navigation pops keys.
+    state = {}
+    steps = ["project_name", "template", "model", "api_key", "confirm"]
+    step_idx = 0
+
+    def total_steps() -> int:
+        # API key step is only shown if the chosen model requires one the user
+        # hasn't set. We still render it as "step 4 of 5" for consistency — if
+        # skipped, the user sees the confirm step labeled 5 of 5.
+        return 5
+
+    while 0 <= step_idx < len(steps):
+        current = steps[step_idx]
+        theme.clear_screen()
+        theme.step_header(step_idx + 1, total_steps(), _step_title(current))
+
+        result = _dispatch_quick_step(current, state)
+
+        if result is _DONE:
+            # Another wizard path (e.g. Advanced) completed successfully
+            return
+        if result is _QUIT:
+            theme.muted("Exiting setup.")
+            return
+        if result is _BACK:
+            if step_idx == 0:
+                theme.muted("You're at the first step. Press 'q' to quit or enter a name to continue.")
+                continue
+            # Pop state for the CURRENT step (the one we just backed out of)
+            # so the previous step's re-render uses its own cached answer as
+            # default rather than our freshly-entered value
+            _pop_step_state(steps[step_idx], state)
+            step_idx -= 1
+            continue
+        if result is _SKIP:
+            state[current] = None  # explicit skip marker
+            step_idx += 1
+            continue
+
+        # Non-sentinel: result is already stored in state by the dispatch
+        step_idx += 1
+
+    # Finalize — state is complete
+    _finalize_quick_start(state)
+
+
+def _step_title(step_name: str) -> str:
+    titles = {
+        "project_name": "Name your project",
+        "template": "Pick an agent template",
+        "model": "Pick a model",
+        "api_key": "API key",
+        "confirm": "Review and launch",
+    }
+    return titles.get(step_name, step_name)
+
+
+def _pop_step_state(step_name: str, state: dict):
+    """Remove answers associated with a given step from state."""
+    keys_per_step = {
+        "project_name": ["project_name", "project_desc", "work_dir"],
+        "template": ["template"],
+        "model": ["model_preset", "_available_presets"],
+        "api_key": ["api_key_status", "api_key_pending"],
+        "confirm": [],
+    }
+    for k in keys_per_step.get(step_name, [step_name]):
+        state.pop(k, None)
+
+
+def _dispatch_quick_step(step_name: str, state: dict):
+    """Run a single Quick Start step. Mutates state. Returns value or sentinel."""
+    if step_name == "project_name":
+        return _step_project_name(state)
+    if step_name == "template":
+        return _step_template(state)
+    if step_name == "model":
+        return _step_model(state)
+    if step_name == "api_key":
+        return _step_api_key(state)
+    if step_name == "confirm":
+        return _step_confirm(state)
+    raise ValueError(f"Unknown step: {step_name}")
+
+
+def _step_project_name(state: dict):
+    """Step 1: project name → derive project_desc + work_dir."""
+    default = state.get("project_name") or "My Crew"
+    print("  Give your project a short name. This is how you'll refer to it.\n")
+    print(_nav_hint())
+    result = _prompt_nav("Project name", default=default, required=True)
+    if result in (_BACK, _SKIP, _QUIT):
+        return result
+    state["project_name"] = result
+    state["project_desc"] = f"Starling crew: {result}"
+    state["work_dir"] = os.path.expanduser(
+        f"~/starling-projects/{result.lower().replace(' ', '-')}"
+    )
+    return result
+
+
+def _step_template(state: dict):
+    """Step 2: pick an agent template."""
+    try:
+        from semantic_router import AGENT_TEMPLATES, list_templates
+    except ImportError:
+        theme.error("Templates unavailable (semantic_router import failed).")
+        theme.info("Switching to Advanced wizard for manual agent creation.")
+        _run_full_wizard()
+        return _DONE
+
+    templates = list_templates()
+    if not templates:
+        theme.warn("No agent templates are registered.")
+        theme.info("Switching to Advanced wizard for manual agent creation.")
+        _run_full_wizard()
+        return _DONE
+
+    options = []
+    for tid, tname in templates:
+        tmpl = AGENT_TEMPLATES[tid]
+        purpose = tmpl.get("primary_purpose", "")[:55]
+        display = f"{theme.color(tname, 'accent', bold=True):30s} — {theme.color(purpose, 'muted')}"
+        options.append((display, tid))
+    options.append((theme.color("Custom (build from scratch — advanced wizard)", "warning"), "_custom"))
+
+    print("  Pick the agent type that best matches what you want done.\n")
+    print(_nav_hint())
+    default_idx = 0
+    if state.get("template"):
+        for i, (_, tid) in enumerate(options):
+            if tid == state["template"]:
+                default_idx = i
+                break
+
+    result = _pick_option("Template", options, default_index=default_idx)
+    if result in (_BACK, _SKIP, _QUIT):
+        return result
+    if result == "_custom":
+        theme.info("Switching to Advanced wizard for custom agent creation.")
+        _run_full_wizard()
+        return _DONE  # Advanced wizard took over and ran to completion
+    state["template"] = result
+    return result
+
+
+def _step_model(state: dict):
+    """Step 3: pick a model — filtered to available ones only."""
+    from model_wizard import load_presets
+    all_presets = load_presets()
+    available = [(k, v) for k, v in all_presets.items() if _preset_available(k, v)]
+
+    if not available:
+        theme.warn("No model presets have valid API keys or are reachable locally.")
+        print("    Set API keys in your environment, or start LM Studio/Ollama, then re-run setup.")
+        print("    Continuing with all presets — you'll need to add a key afterwards.")
+        available = list(all_presets.items())
+
+    options = []
+    for k, v in available:
+        key_env = v.get("api_key_env")
+        key_status = ""
+        if key_env and os.environ.get(key_env):
+            key_status = theme.color(" [key set]", "success")
+        elif not key_env:
+            key_status = theme.color(" [local]", "accent")
+        display = f"{k:18s} {v.get('label', ''):30s}{key_status}"
+        options.append((display, k))
+
+    print("  Pick the LLM that will power your agent.\n")
+    print(_nav_hint())
+    default_idx = 0
+    if state.get("model_preset"):
+        for i, (_, k) in enumerate(options):
+            if k == state["model_preset"]:
+                default_idx = i
+                break
+
+    result = _pick_option("Model", options, default_index=default_idx)
+    if result in (_BACK, _SKIP, _QUIT):
+        return result
+    state["model_preset"] = result
+    state["_available_presets"] = dict(available)  # cached for api_key step
+    return result
+
+
+def _step_api_key(state: dict):
+    """Step 4: prompt for API key if needed. Skippable.
+
+    Does NOT write to disk — stores the pending key in state. Actual write
+    happens in _finalize_quick_start once the user confirms. This way backing
+    out and changing work_dir doesn't leave orphan .env files behind.
+
+    Records one of: "no_key_needed", "already_set", "saved", "skipped".
+    """
+    from model_wizard import load_presets
+    presets = state.get("_available_presets") or load_presets()
+    preset_key = state.get("model_preset")
+    preset = presets.get(preset_key, {})
+    key_env = preset.get("api_key_env")
+
+    # Normalize: treat empty string env var name same as None
+    if not key_env:
+        theme.success(f"No API key needed for {preset.get('label', preset_key)} (local model).")
+        state["api_key_status"] = "no_key_needed"
+        state["api_key_pending"] = None
+        try:
+            input(theme.color("  Press Enter to continue...", "muted"))
+        except (EOFError, KeyboardInterrupt):
+            return _QUIT
+        return "no_key_needed"
+
+    if os.environ.get(key_env):
+        theme.success(f"{key_env} is already set in your environment.")
+        state["api_key_status"] = "already_set"
+        state["api_key_pending"] = None
+        try:
+            input(theme.color("  Press Enter to continue...", "muted"))
+        except (EOFError, KeyboardInterrupt):
+            return _QUIT
+        return "already_set"
+
+    print(f"  {theme.color(preset.get('label', preset_key), 'accent', bold=True)} needs an API key.")
+    print(f"  Environment variable: {theme.color(key_env, 'highlight')}")
+    print(f"  You can skip and add it later via the Models tab or .env file.\n")
+    print(_nav_hint(skippable=True))
+
+    result = _prompt_nav("API key", hint=f"paste value for {key_env}", skippable=True)
+    if result in (_BACK, _QUIT):
+        return result
+    if result is _SKIP:
+        theme.muted(f"Skipped — remember to set {key_env} before launching.")
+        state["api_key_status"] = "skipped"
+        state["api_key_pending"] = None
+        return _SKIP
+    # Stage the key for writing during finalize (do NOT touch work_dir yet —
+    # user may go back and change it)
+    state["api_key_status"] = "pending_save"
+    state["api_key_pending"] = {"env_var": key_env, "value": result}
+    theme.success(f"{key_env} will be saved to your work dir on confirm.")
+    return result
+
+
+def _save_env_key(work_dir: str, env_var: str, key: str):
+    """Write a key=value line to {work_dir}/.env, preserving existing keys."""
+    os.makedirs(work_dir, exist_ok=True)
+    env_path = os.path.join(work_dir, ".env")
+    existing = {}
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    existing[k.strip()] = v.strip()
+    existing[env_var] = key
+    with open(env_path, "w") as f:
+        for k, v in existing.items():
+            f.write(f"{k}={v}\n")
+    os.chmod(env_path, 0o600)
+
+
+def _step_confirm(state: dict):
+    """Step 5: summary + launch."""
+    from semantic_router import get_template
+    tmpl = get_template(state["template"])
+    print(f"  {theme.color('Review your setup', 'primary', bold=True)}:\n")
+    print(f"    Project:    {theme.color(state['project_name'], 'accent')}")
+    print(f"    Work dir:   {theme.color(state['work_dir'], 'muted')}")
+    print(f"    Template:   {theme.color(tmpl['name'], 'accent')} "
+          f"({theme.color(tmpl['tier'], 'highlight')})")
+    print(f"    Model:      {theme.color(state['model_preset'], 'accent')}")
+    api_status_map = {
+        "no_key_needed": theme.color("not needed (local model)", "accent"),
+        "already_set":   theme.color("already set in environment", "success"),
+        "pending_save":  theme.color("will save to .env on confirm", "accent"),
+        "skipped":       theme.color("[skipped — add later]", "warning"),
+    }
+    api_display = api_status_map.get(state.get("api_key_status"), theme.color("?", "muted"))
+    print(f"    API key:    {api_display}\n")
+
+    print(_nav_hint())
+    try:
+        raw = input(theme.color("  Save and launch Starling? [Y/n/b/q]: ", "highlight")).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return _QUIT
+    if raw == "b":
+        return _BACK
+    if raw == "q":
+        return _QUIT
+    if raw and raw != "y" and raw[0] != "y":
+        theme.muted("Cancelled. Run setup again when you're ready.")
+        return _QUIT
+    return "confirmed"
+
+
+def _finalize_quick_start(state: dict):
+    """Write the config from Quick Start state and launch Starling.
+
+    This is the single place where filesystem side effects happen — earlier
+    steps stage their data in `state` but do not create directories or files.
+    That way backing out of confirm never leaves orphan files behind.
+    """
+    # Defensive guard — we expect the state machine to enforce these, but a
+    # future refactor bug shouldn't produce a user-facing KeyError stacktrace
+    required = ("project_name", "project_desc", "work_dir", "template", "model_preset")
+    missing = [k for k in required if not state.get(k)]
+    if missing:
+        theme.error(f"Internal error: missing state {missing}. Please re-run setup.")
+        return
+
+    from semantic_router import get_template
+
+    tmpl = get_template(state["template"])
+    if tmpl is None:
+        theme.error(f"Template '{state['template']}' not found. Please re-run setup.")
+        return
+
+    work_dir = state["work_dir"]
+    os.makedirs(work_dir, exist_ok=True)
+    for sub in ("output", "memory", "skills"):
+        os.makedirs(os.path.join(work_dir, sub), exist_ok=True)
+
+    # Write API key to work dir .env only now that user has confirmed
+    pending = state.get("api_key_pending")
+    if pending:
+        _save_env_key(work_dir, pending["env_var"], pending["value"])
+        os.environ[pending["env_var"]] = pending["value"]  # apply to current session
+        theme.success(f"{pending['env_var']} saved to {os.path.join(work_dir, '.env')}")
+
+    agent = {
+        "id": state["template"],
+        "name": tmpl["name"],
+        "role": tmpl["role"],
+        "goal": tmpl["goal"],
+        "backstory": tmpl["backstory"],
+        "tools": list(tmpl["tools"]),
+        "preset": state["model_preset"],
+        "color": tmpl.get("color", "cyan"),
+        "allow_delegation": False,
+        "template": state["template"],
+        "tier": tmpl.get("tier", "specialist"),
+    }
+
+    config = {
+        "project": {
+            "name": state["project_name"],
+            "description": state["project_desc"],
+            "work_dir": work_dir,
+        },
+        "agents": [agent],
+        "max_agents": MAX_AGENTS,
+        "default_tasks": [],
+        "routing": {
+            "keywords": {},
+            "default_agent": agent["id"],
+        },
+    }
+
+    config_path = os.path.join(os.path.dirname(__file__), "project_config.json")
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2)
+
+    theme.clear_screen()
+    theme.banner("Setup Complete!")
+    theme.success(f"Config saved: {config_path}")
+    print(f"  Project: {theme.color(state['project_name'], 'accent')}")
+    print(f"  Agent:   {theme.color(tmpl['name'], 'accent')} on {theme.color(state['model_preset'], 'accent')}")
+    print(f"  Work dir: {work_dir}\n")
+
+    _launch_starling_or_exit(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _run_team_setup():
+    """Team Setup path — currently delegates to the full wizard.
+
+    In a future release this will get its own streamlined multi-agent flow.
+    For now, the existing full wizard handles multiple agents well enough.
+    """
+    theme.muted("Team Setup uses the Advanced wizard for now. Future releases will have a dedicated flow.\n")
+    try:
+        input(theme.color("  Press Enter to continue...", "muted"))
+    except (EOFError, KeyboardInterrupt):
+        return
+    _run_full_wizard()
+
+
+def _launch_starling_or_exit(project_dir: str):
+    """Stop any running daemon, then offer to launch Starling."""
+    # Stop any running daemon so it picks up the new config
+    try:
+        import daemon as _daemon
+        if _daemon.is_running():
+            theme.muted("\n  Stopping existing Starling daemon to apply new config...")
+            _daemon.stop()
+    except Exception as e:
+        theme.muted(f"  (Could not check/stop daemon: {e})")
+
+    try:
+        answer = input(theme.color("\n  Launch Starling now? [Y/n]: ", "highlight")).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    if answer and answer[0] != "y":
+        print(f"\n  To launch later:  cd {project_dir} && uv run starling\n")
+        return
+
+    import shutil
+    starling_bin = shutil.which("starling")
+    if starling_bin:
+        print()
+        try:
+            os.execv(starling_bin, [starling_bin])
+        except OSError as e:
+            theme.error(f"Failed to exec {starling_bin}: {e}")
+            # Fall through to uv attempt
+    uv_bin = shutil.which("uv")
+    if uv_bin:
+        try:
+            os.chdir(project_dir)
+            print()
+            os.execv(uv_bin, [uv_bin, "run", "starling"])
+        except OSError as e:
+            theme.error(f"Failed to exec {uv_bin}: {e}")
+    theme.warn("Could not launch Starling automatically.")
+    print(f"  Run manually:  cd {project_dir} && uv run starling\n")
+
+
+def _run_full_wizard():
+    """Advanced path — the original full wizard flow (preserved verbatim)."""
     _banner("Starling Setup Wizard")
     print("  This wizard will configure your Starling project.\n")
 
@@ -199,35 +797,7 @@ def run_setup():
     print(f"  Agents:  {len(agents)}")
     print(f"  Work dir: {work_dir}")
     project_dir = os.path.dirname(os.path.abspath(__file__))
-
-    # Stop any running daemon so it picks up the new config on next launch
-    try:
-        import daemon as _daemon
-        if _daemon.is_running():
-            print("\n  Stopping existing Starling daemon to apply new config...")
-            _daemon.stop()
-    except Exception as e:
-        print(f"  (Could not check/stop daemon: {e})")
-
-    # Offer to launch Starling now — os.execv replaces this process cleanly
-    if _prompt_yn("\n  Launch Starling now?", True):
-        import shutil
-        starling_bin = shutil.which("starling")
-        if starling_bin:
-            print()  # blank line before launch
-            os.execv(starling_bin, [starling_bin])
-        else:
-            # Fall back to `uv run` from the project dir
-            uv_bin = shutil.which("uv")
-            if uv_bin:
-                os.chdir(project_dir)
-                print()
-                os.execv(uv_bin, [uv_bin, "run", "starling"])
-            else:
-                print(f"\n  Could not find 'starling' or 'uv' on PATH.")
-                print(f"  Run manually:  cd {project_dir} && uv run starling\n")
-    else:
-        print(f"\n  To launch later:  cd {project_dir} && uv run starling\n")
+    _launch_starling_or_exit(project_dir)
 
 
 SKILL_PACKS = {

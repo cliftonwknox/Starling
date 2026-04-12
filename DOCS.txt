@@ -39,8 +39,22 @@ Steps:
   3. Run the setup wizard
      uv run starling setup
 
-  4. Launch the TUI
-     uv run starling
+  4. The wizard offers three paths:
+
+     Quick start   1 agent, template-based (~5 prompts, ~1 minute)
+                   Ideal for your first crew or a focused single-agent setup
+     Team setup    Multiple agents with templates
+     Advanced      Full control over every field (traditional flow)
+
+     Navigation in every step:
+       Enter   accept and move on
+       b       go back to the previous step
+       s       skip this step (only on skippable fields)
+       q       quit (with confirmation)
+
+  5. On completion, the wizard offers to launch Starling immediately.
+     If a daemon is already running, it stops cleanly so the new config
+     takes effect.
 
 The setup wizard creates:
   - project_config.json   Your agents, tools, and routing rules
