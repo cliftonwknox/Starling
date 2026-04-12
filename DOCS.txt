@@ -29,8 +29,8 @@ Prerequisites:
 
 Steps:
   1. Clone the repository
-     git clone https://github.com/cliftonwknox/starling.git
-     cd starling
+     git clone https://github.com/cliftonwknox/Starling.git
+     cd Starling
 
   2. Install dependencies
      uv sync

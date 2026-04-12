@@ -14,8 +14,8 @@ the terminal is closed.
 ## Quick start
 
 ```
-git clone https://github.com/cliftonwknox/starling.git
-cd starling
+git clone https://github.com/cliftonwknox/Starling.git
+cd Starling
 uv sync
 uv pip install -e .
 uv run starling setup
