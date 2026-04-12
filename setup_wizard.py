@@ -9,6 +9,45 @@ COLORS = ["cyan", "green", "yellow", "magenta", "blue", "red", "white", "orange"
 MAX_AGENTS = 10
 
 
+def _contains_manager(value: str) -> bool:
+    """Check if a string contains the blocked 'manager' keyword (case-insensitive)."""
+    return "manager" in (value or "").lower()
+
+
+def _print_manager_block(field: str):
+    """Print the standard block message for a manager keyword violation."""
+    print(f"  BLOCKED: 'manager' is not allowed in {field}.")
+    print(f"    CrewAI strips tool access from agents with 'manager' in the name.")
+    print(f"    Use 'coordinator', 'lead', 'director', or 'supervisor' instead.")
+
+
+def _preset_available(key: str, preset: dict) -> bool:
+    """Check if a model preset is usable — has API key set, or local server reachable.
+
+    Returns False for malformed/unreachable presets. Cloud presets without an
+    api_key_env set are treated as unavailable (there's no way to reach them).
+    """
+    if not isinstance(preset, dict):
+        return False
+    key_env = preset.get("api_key_env")
+    if key_env:
+        return bool(os.environ.get(key_env))
+    base_url = preset.get("base_url")
+    if not isinstance(base_url, str) or not base_url:
+        # No key and no URL — can't reach this preset
+        return False
+    # Local models (lm-studio, ollama): ping the server with a short timeout
+    if "127.0.0.1" in base_url or "localhost" in base_url:
+        import urllib.request
+        try:
+            urllib.request.urlopen(base_url.rstrip("/") + "/models", timeout=1)
+            return True
+        except Exception:
+            return False
+    # Remote URL without an api_key_env — we have no credentials, so unavailable
+    return False
+
+
 def _prompt(text, default="", required=False):
     while True:
         if default:
@@ -91,10 +130,15 @@ def run_setup():
     print("  The first agent is typically the leader/reviewer.\n")
     num_agents = _prompt_int("How many agents?", default=3, min_val=1, max_val=MAX_AGENTS)
 
-    # Load presets for selection
+    # Load presets for selection (filter to only those with valid API keys
+    # or reachable local servers — avoids offering models the user can't use)
     from model_wizard import load_presets
     presets = load_presets()
-    preset_keys = list(presets.keys())
+    preset_keys = [k for k, v in presets.items() if _preset_available(k, v)]
+    if not preset_keys:
+        print("  No model presets are configured or reachable.")
+        print("  Set API keys in your environment or start LM Studio/Ollama, then re-run setup.")
+        preset_keys = list(presets.keys())  # fall back to all so setup can proceed
 
     # Load available tools
     from crew import list_available_tools
@@ -155,7 +199,35 @@ def run_setup():
     print(f"  Agents:  {len(agents)}")
     print(f"  Work dir: {work_dir}")
     project_dir = os.path.dirname(os.path.abspath(__file__))
-    print(f"\n  To launch:  cd {project_dir} && uv run starling\n")
+
+    # Stop any running daemon so it picks up the new config on next launch
+    try:
+        import daemon as _daemon
+        if _daemon.is_running():
+            print("\n  Stopping existing Starling daemon to apply new config...")
+            _daemon.stop()
+    except Exception as e:
+        print(f"  (Could not check/stop daemon: {e})")
+
+    # Offer to launch Starling now — os.execv replaces this process cleanly
+    if _prompt_yn("\n  Launch Starling now?", True):
+        import shutil
+        starling_bin = shutil.which("starling")
+        if starling_bin:
+            print()  # blank line before launch
+            os.execv(starling_bin, [starling_bin])
+        else:
+            # Fall back to `uv run` from the project dir
+            uv_bin = shutil.which("uv")
+            if uv_bin:
+                os.chdir(project_dir)
+                print()
+                os.execv(uv_bin, [uv_bin, "run", "starling"])
+            else:
+                print(f"\n  Could not find 'starling' or 'uv' on PATH.")
+                print(f"  Run manually:  cd {project_dir} && uv run starling\n")
+    else:
+        print(f"\n  To launch later:  cd {project_dir} && uv run starling\n")
 
 
 SKILL_PACKS = {
@@ -414,6 +486,13 @@ def _setup_agent(index: int, preset_keys: list, presets: dict, available_tools: 
         if tmpl_choice.isdigit() and 1 <= int(tmpl_choice) <= len(templates):
             tid, tname = templates[int(tmpl_choice) - 1]
             tmpl = AGENT_TEMPLATES[tid]
+            # Safeguard: template fields shouldn't contain "manager", but
+            # templates are editable data — block if a future template violates
+            for field in ("id", "name", "role"):
+                val = tid if field == "id" else tmpl.get(field, "")
+                if _contains_manager(val):
+                    _print_manager_block(f"template {field} (template '{tid}' is invalid)")
+                    raise RuntimeError(f"Template '{tid}' has 'manager' in {field}")
             print(f"  Loading template: {tname}")
             print(f"  (You can edit any field below)")
             # Pre-fill and jump to the edit flow
@@ -428,6 +507,7 @@ def _setup_agent(index: int, preset_keys: list, presets: dict, available_tools: 
                 "color": tmpl.get("color", "white"),
                 "allow_delegation": False,
                 "template": tid,
+                "tier": tmpl.get("tier", "specialist"),
             }
             # Let user pick a model preset
             print(f"\n  Available model presets:")
@@ -446,8 +526,11 @@ def _setup_agent(index: int, preset_keys: list, presets: dict, available_tools: 
                 print(f"  Enter a number or preset name.")
             agent["preset"] = choice
             return agent
-    except Exception:
-        pass  # templates unavailable, proceed manually
+    except ImportError:
+        # semantic_router not available (fastembed missing) — proceed without templates
+        pass
+    # NOTE: RuntimeError from a template containing 'manager' is NOT caught here —
+    # it propagates to the wizard's top level so the user sees the rejection.
 
     # ID
     while True:
@@ -456,19 +539,24 @@ def _setup_agent(index: int, preset_keys: list, presets: dict, available_tools: 
         if agent_id in used_ids:
             print(f"  ID '{agent_id}' already taken. Pick another.")
             continue
-        if "manager" in agent_id:
-            print(f"  WARNING: CrewAI treats agents with 'manager' in the ID as hierarchical managers.")
-            print(f"    These agents CANNOT have tools assigned. Consider 'coordinator' or 'lead' instead.")
-            confirm = _prompt("  Keep this ID anyway? (y/n)", "n")
-            if confirm.lower() != "y":
-                continue
+        if _contains_manager(agent_id):
+            _print_manager_block("agent IDs")
+            continue
         break
 
-    name = _prompt("Display name", agent_id.replace("_", " ").title())
-    role = _prompt("Role (what CrewAI sees)", name)
-    if "manager" in role.lower() and "manager" not in agent_id:
-        print(f"  WARNING: CrewAI may treat agents with 'manager' in the role as hierarchical managers.")
-        print(f"    These agents cannot have tools. Consider 'coordinator' or 'lead' instead.")
+    while True:
+        name = _prompt("Display name", agent_id.replace("_", " ").title())
+        if _contains_manager(name):
+            _print_manager_block("display names")
+            continue
+        break
+
+    while True:
+        role = _prompt("Role (what CrewAI sees)", name)
+        if _contains_manager(role):
+            _print_manager_block("roles")
+            continue
+        break
     goal = _prompt("Goal (1-2 sentences)", f"Accomplish tasks as {role}", required=True)
     backstory = _prompt("Backstory (personality/expertise)", f"An experienced {role}", required=True)
 
@@ -540,14 +628,24 @@ def _setup_agent(index: int, preset_keys: list, presets: dict, available_tools: 
             break
         if edit == "1":
             new_id = _prompt("Agent ID", agent["id"]).lower().replace(" ", "_")
-            if new_id in used_ids and new_id != agent["id"]:
+            if _contains_manager(new_id):
+                _print_manager_block("agent IDs")
+            elif new_id in used_ids and new_id != agent["id"]:
                 print(f"  ID '{new_id}' already taken.")
             else:
                 agent["id"] = new_id
         elif edit == "2":
-            agent["name"] = _prompt("Display name", agent["name"])
+            new_name = _prompt("Display name", agent["name"])
+            if _contains_manager(new_name):
+                _print_manager_block("display names")
+            else:
+                agent["name"] = new_name
         elif edit == "3":
-            agent["role"] = _prompt("Role", agent["role"])
+            new_role = _prompt("Role", agent["role"])
+            if _contains_manager(new_role):
+                _print_manager_block("roles")
+            else:
+                agent["role"] = new_role
         elif edit == "4":
             agent["goal"] = _prompt("Goal", agent["goal"], required=True)
         elif edit == "5":

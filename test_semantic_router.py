@@ -21,12 +21,16 @@ class TestAgentTemplates(unittest.TestCase):
         self.assertEqual(len(AGENT_TEMPLATES), 6)
 
     def test_all_templates_have_required_fields(self):
-        from semantic_router import AGENT_TEMPLATES
+        from semantic_router import AGENT_TEMPLATES, VALID_TIERS
         required = {"name", "role", "goal", "backstory", "primary_purpose",
-                     "secondary_purposes", "tools", "color"}
+                     "secondary_purposes", "tools", "color", "tier"}
         for tid, tmpl in AGENT_TEMPLATES.items():
             for field in required:
                 self.assertIn(field, tmpl, f"Template '{tid}' missing '{field}'")
+            self.assertIn(
+                tmpl["tier"], VALID_TIERS,
+                f"Template '{tid}' has invalid tier '{tmpl['tier']}'"
+            )
 
     def test_list_templates(self):
         from semantic_router import list_templates
@@ -253,10 +257,19 @@ class TestEndToEnd(unittest.TestCase):
     """End-to-end integration tests across the full system."""
 
     def test_full_heartbeat_flow(self):
-        """Route -> dedup check -> progress -> record, all in sequence."""
+        """Route -> dedup check -> progress -> record, all in sequence.
+
+        Isolates test state properly: cleans up the dedup table entry created
+        during the test, so repeated runs don't poison each other via shared
+        vocabulary in description embeddings.
+        """
         from heartbeat import add_task, auto_route, update_task, _load_queue, _get_data_file
-        from semantic_router import check_duplicate, measure_progress, record_completed_task
+        from semantic_router import (
+            check_duplicate, measure_progress, record_completed_task,
+            _get_dedup_table, _DEDUP_TABLE, _get_db,
+        )
         import os
+        import secrets
 
         # Back up queue
         data_file = _get_data_file("task_queue.json")
@@ -265,16 +278,36 @@ class TestEndToEnd(unittest.TestCase):
             with open(data_file) as f:
                 backup = f.read()
 
-        import uuid
-        unique_marker = uuid.uuid4().hex[:12]
+        # Fully random description — 128 bits of entropy. Note: embedding
+        # models still pick up the fixed "isolated test probe" prefix, so
+        # we explicitly clean up the dedup row after the assertions below.
+        probe_tag = secrets.token_hex(16)
+        unique_description = f"isolated test probe {probe_tag}"
+
+        # Remove any leftover rows from prior failed runs — this test owns
+        # the "isolated test probe" namespace in the dedup table
+        def _cleanup_dedup():
+            try:
+                table = _get_dedup_table()
+                # LanceDB supports delete with SQL-like predicates
+                table.delete("description LIKE 'isolated test probe %'")
+            except Exception:
+                pass  # cleanup is best-effort
+
+        _cleanup_dedup()
+
         try:
-            task = add_task(f"e2e test unique description {unique_marker}")
+            task = add_task(unique_description)
             agent_id, method = auto_route(task["description"])
             self.assertIsNotNone(agent_id)
             self.assertIn(method, ("keyword", "semantic", "default"))
 
-            # No duplicate yet (fresh unique description)
-            self.assertIsNone(check_duplicate(task["description"]))
+            # No duplicate yet — table was just cleaned and description is fresh
+            pre_dup = check_duplicate(task["description"])
+            self.assertIsNone(
+                pre_dup,
+                f"Fresh description after cleanup unexpectedly matched: {pre_dup}"
+            )
 
             # Measure progress
             result = "Yankees favored -150, Dodgers +130."
@@ -283,11 +316,14 @@ class TestEndToEnd(unittest.TestCase):
             self.assertGreater(progress["score"], 0)
 
             # Record and verify dedup catches it
-            record_completed_task(task["id"], task["description"], agent_id, "2026-04-11T21:00:00")
+            record_completed_task(
+                task["id"], task["description"], agent_id, "2026-04-11T21:00:00"
+            )
             dup = check_duplicate(task["description"])
             self.assertIsNotNone(dup)
             self.assertEqual(dup["task_id"], task["id"])
         finally:
+            _cleanup_dedup()
             if backup:
                 with open(data_file, "w") as f:
                     f.write(backup)

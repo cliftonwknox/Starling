@@ -44,6 +44,7 @@ naming your agents, picking AI models, and configuring tools.
 - Cron scheduling with approval workflow (agents can propose crons)
 - Semantic task routing: automatic agent selection by meaning, not keywords
 - 6 pre-built agent templates (Researcher, Content Writer, Data Analyst, etc.)
+- Agent tier system: Specialist / Coordinator / Leader with cumulative permissions
 - Duplicate work detection and progress tracking
 - Task queue with heartbeat processing
 - Agent memory (episodic + semantic) with global cross-agent knowledge sharing

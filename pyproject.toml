@@ -1,6 +1,6 @@
 [project]
 name = "starling"
-version = "1.1.0-alpha"
+version = "1.2.0-alpha"
 description = "Starling — Config-driven CrewAI Terminal UI with semantic routing and heartbeat task engine"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -23,4 +23,4 @@ dependencies = [
 starling = "cli:main"
 
 [tool.setuptools]
-py-modules = ["cli", "tui", "crew", "heartbeat", "agent_memory", "crew_memory", "model_wizard", "telegram_notify", "telegram_listener", "config_loader", "setup_wizard", "daemon", "cron_engine", "semantic_router"]
+py-modules = ["cli", "tui", "crew", "heartbeat", "agent_memory", "crew_memory", "model_wizard", "telegram_notify", "telegram_listener", "config_loader", "setup_wizard", "daemon", "cron_engine", "semantic_router", "theme"]

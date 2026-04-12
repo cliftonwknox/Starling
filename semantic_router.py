@@ -42,6 +42,7 @@ AGENT_TEMPLATES = {
             "crewai:TXTSearchTool", "crewai:WebsiteSearchTool",
         ],
         "color": "green",
+        "tier": "specialist",
     },
     "content_writer": {
         "name": "Content Writer",
@@ -59,6 +60,7 @@ AGENT_TEMPLATES = {
             "crewai:DirectoryReadTool",
         ],
         "color": "magenta",
+        "tier": "specialist",
     },
     "data_analyst": {
         "name": "Data Analyst",
@@ -77,6 +79,7 @@ AGENT_TEMPLATES = {
             "crewai:DirectoryReadTool",
         ],
         "color": "cyan",
+        "tier": "specialist",
     },
     "project_planner": {
         "name": "Project Planner",
@@ -94,6 +97,7 @@ AGENT_TEMPLATES = {
             "crewai:DirectoryReadTool",
         ],
         "color": "blue",
+        "tier": "specialist",
     },
     "software_engineer": {
         "name": "Software Engineer",
@@ -112,6 +116,7 @@ AGENT_TEMPLATES = {
             "crewai:CodeInterpreterTool",
         ],
         "color": "yellow",
+        "tier": "specialist",
     },
     "customer_support": {
         "name": "Customer Support",
@@ -129,8 +134,40 @@ AGENT_TEMPLATES = {
             "crewai:DirectoryReadTool",
         ],
         "color": "red",
+        "tier": "specialist",
     },
 }
+
+
+# === Skill tier system ===
+
+TIER_ORDER = {"specialist": 1, "coordinator": 2, "leader": 3}
+VALID_TIERS = {"specialist", "coordinator", "leader"}
+
+
+def agent_has_tier(agent: dict, required_tier: str) -> bool:
+    """Check if an agent's tier meets or exceeds a required tier.
+
+    Example: a leader (tier 3) satisfies a coordinator requirement (tier 2).
+    A specialist (tier 1) does not satisfy coordinator (tier 2).
+
+    Logs a warning if the agent's tier or the required_tier is unknown,
+    so typos/refactoring bugs surface instead of silently returning False.
+    """
+    agent_tier = agent.get("tier", "specialist")
+    if agent_tier not in VALID_TIERS:
+        logger.warning(
+            f"Agent '{agent.get('id', '?')}' has unknown tier '{agent_tier}' — "
+            f"treating as insufficient permission"
+        )
+        return False
+    if required_tier not in VALID_TIERS:
+        logger.warning(
+            f"Unknown required_tier '{required_tier}' — valid tiers: "
+            f"{sorted(VALID_TIERS)}"
+        )
+        return False
+    return TIER_ORDER[agent_tier] >= TIER_ORDER[required_tier]
 
 
 def get_template(template_id: str) -> Optional[dict]:

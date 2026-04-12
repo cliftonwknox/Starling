@@ -613,11 +613,14 @@ class StarlingApp(App):
                         yield Static("Available Models")
                         _all_presets = _load_model_presets()
                         def _preset_available(k, v):
+                            if not isinstance(v, dict):
+                                return False
                             key_env = v.get("api_key_env")
                             if key_env:
                                 return bool(os.environ.get(key_env))
-                            # Local models: check if server is reachable
-                            base_url = v.get("base_url", "")
+                            base_url = v.get("base_url")
+                            if not isinstance(base_url, str) or not base_url:
+                                return False
                             if "127.0.0.1" in base_url or "localhost" in base_url:
                                 import urllib.request
                                 try:
@@ -625,7 +628,8 @@ class StarlingApp(App):
                                     return True
                                 except Exception:
                                     return False
-                            return True
+                            # Remote URL without api_key_env — can't verify access
+                            return False
                         _active_presets = [
                             (f"{k} — {v['label']}", k)
                             for k, v in _all_presets.items()
@@ -1494,10 +1498,14 @@ class StarlingApp(App):
             log.write("[red]Agent ID, Name, and Role are required.[/]")
             return
 
-        # Check manager restriction
-        if "manager" in agent_id or "manager" in role.lower():
-            log.write("[red]Warning: 'manager' in ID or role will block tool access in CrewAI.[/]")
-            log.write("[dim]Use 'coordinator', 'lead', or 'director' instead.[/]")
+        # Hard block: "manager" is not allowed anywhere in the agent identity
+        # (case-insensitive — defensive even though agent_id is already lowered)
+        if ("manager" in agent_id.lower()
+                or "manager" in role.lower()
+                or "manager" in name.lower()):
+            log.write("[red]BLOCKED: 'manager' is not allowed in agent ID, name, or role.[/]")
+            log.write("[red]CrewAI strips tool access from agents with 'manager' in the name.[/]")
+            log.write("[dim]Use 'coordinator', 'lead', 'director', or 'supervisor' instead.[/]")
             return
 
         # Get preset

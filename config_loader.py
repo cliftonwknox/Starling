@@ -7,6 +7,7 @@ Searches for project_config.json in: $STARLING_CONFIG, ./project_config.json,
 
 import json
 import os
+import threading
 from typing import Optional
 
 # Search order for project config
@@ -19,6 +20,7 @@ _SEARCH_PATHS = [
 
 _cached_config: Optional[dict] = None
 _config_path: Optional[str] = None
+_cache_lock = threading.Lock()  # guards _cached_config + _config_path
 
 
 def _find_config() -> Optional[str]:
@@ -39,19 +41,109 @@ def get_config_path() -> Optional[str]:
 
 
 def load_project_config(force_reload: bool = False) -> dict:
-    """Load and cache the project config. Returns empty structure if not found."""
+    """Load and cache the project config. Returns empty structure if not found
+    or if the file is malformed (logs a warning in that case).
+
+    Thread-safe: guards the module-level cache with a lock so concurrent
+    first-loads from multiple threads don't double-migrate or race.
+    """
+    import logging
+    logger = logging.getLogger("starling.config_loader")
+
     global _cached_config, _config_path
-    if _cached_config is not None and not force_reload:
+
+    with _cache_lock:
+        if _cached_config is not None and not force_reload:
+            return _cached_config
+
+        path = _find_config()
+        if not path:
+            return _empty_config()
+
+        try:
+            with open(path) as f:
+                _cached_config = json.load(f)
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+            logger.error(
+                f"Failed to load project_config.json at {path}: {e}. "
+                f"Using empty config — run 'starling setup' to reconfigure."
+            )
+            return _empty_config()
+
+        _config_path = path
+        # Auto-migrate agents missing tier field (preserves backwards compat)
+        _migrate_agent_tiers(_cached_config)
         return _cached_config
 
-    path = _find_config()
-    if not path:
-        return _empty_config()
 
-    with open(path) as f:
-        _cached_config = json.load(f)
-    _config_path = path
-    return _cached_config
+def _migrate_agent_tiers(config: dict) -> bool:
+    """Assign sensible default tiers to agents that don't have one.
+
+    Precedence rules (in order):
+        1. Explicit `tier` field on an agent wins over all heuristics.
+        2. If an agent already has `tier: "leader"`, no other agent can be
+           auto-promoted to leader (one-Leader rule). The routing
+           `default_agent` is silently demoted in this case.
+        3. For untiered agents:
+           - matches routing.default_agent (and no leader assigned yet) → leader
+           - allow_delegation=True → coordinator
+           - else → specialist
+
+    Writes changes back to config in-place. Returns True if any changes made.
+    Does NOT save to disk — caller saves when appropriate. Logs a warning if
+    the default_agent is demoted due to an existing explicit leader.
+    """
+    import logging
+    logger = logging.getLogger("starling.config_loader")
+
+    # Tolerate "agents": null as well as missing key
+    agents = config.get("agents") or []
+    if not agents:
+        return False
+
+    # Valid tier values (kept local to avoid circular import from semantic_router)
+    _VALID_TIERS = {"specialist", "coordinator", "leader"}
+
+    default_agent_id = (config.get("routing") or {}).get("default_agent", "")
+    changed = False
+    leader_assigned = False
+
+    # First pass: validate existing tier values; mark leader assignment
+    for agent in agents:
+        if "tier" in agent:
+            tier = agent["tier"]
+            if tier not in _VALID_TIERS:
+                logger.warning(
+                    f"Agent '{agent.get('id', '?')}' has invalid tier "
+                    f"'{tier}' — correcting to 'specialist'. "
+                    f"Valid tiers: {sorted(_VALID_TIERS)}."
+                )
+                agent["tier"] = "specialist"
+                changed = True
+            elif agent["tier"] == "leader":
+                leader_assigned = True
+                if default_agent_id and agent.get("id") != default_agent_id:
+                    logger.warning(
+                        f"Agent '{agent.get('id')}' has explicit tier='leader' but "
+                        f"routing.default_agent='{default_agent_id}' does not match. "
+                        f"Explicit tier takes precedence; default_agent will not be "
+                        f"auto-promoted to leader."
+                    )
+
+    # Second pass: assign tiers to untiered agents
+    for agent in agents:
+        if "tier" in agent:
+            continue
+        if agent.get("id") == default_agent_id and not leader_assigned:
+            agent["tier"] = "leader"
+            leader_assigned = True
+        elif agent.get("allow_delegation"):
+            agent["tier"] = "coordinator"
+        else:
+            agent["tier"] = "specialist"
+        changed = True
+
+    return changed
 
 
 def save_project_config(config: dict, path: Optional[str] = None):
