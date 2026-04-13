@@ -1,8 +1,8 @@
 STARLING DOCUMENTATION
 =====================
 
-Version 1.0
-Last updated: 2026-04-09
+Version 1.3.0-alpha
+Last updated: 2026-04-13
 
 
 OVERVIEW
@@ -43,6 +43,10 @@ Steps:
 
      New project            Start from scratch
      Import existing config Restore from a .starling backup file
+                              Shows a numbered list of every backup in your
+                              configured backup directory. Pick by number,
+                              or use 'd <num>' to delete a backup, or 'p'
+                              to enter a custom path.
      Quit                   Exit setup
 
   5. For new projects, pick a setup path:
@@ -83,6 +87,14 @@ CLI COMMANDS
   starling daemon on    Start the background daemon
   starling daemon off   Stop the background daemon
   starling daemon status Check daemon status
+  starling export       Export current project as a .starling backup
+                          Default includes secrets (API keys + Telegram tokens)
+                          Pass --strip for a share-safe copy without secrets
+                          Pass an output path to override the default location
+                          Default location: ~/starling-backups/
+                          Override default via the prompt on first export, or
+                          edit ~/.config/starling/preferences.json
+  starling version      Print the current Starling version
 
 
 TUI COMMANDS

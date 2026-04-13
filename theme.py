@@ -74,6 +74,12 @@ _ANSI = {
     # Screen control
     "clear": "\033[2J\033[H",
     "clear_line": "\033[2K\r",
+    # Alternative screen buffer (preserves user's shell, swaps to blank canvas)
+    "alt_screen_on": "\033[?1049h",
+    "alt_screen_off": "\033[?1049l",
+    # Default colors — dark bg, light fg. 256-color codes: 234 = #1c1c1c, 255 = #eeeeee
+    "default_dark_bg": "\033[48;5;234m",
+    "default_light_fg": "\033[38;5;255m",
 }
 
 # Map semantic tokens to ANSI names for CLI usage (derived from _PALETTE)
@@ -114,9 +120,124 @@ def clear_screen():
 
     No-op when stdout is not a TTY or NO_COLOR is set — avoids polluting
     piped output and CI logs with control sequences or bulk newlines.
+    When the wizard has entered dark-screen mode, re-paints the dark bg
+    on every clear so lines below our content remain dark, not terminal-default.
     """
-    if _supports_ansi():
+    if not _supports_ansi():
+        return
+    # Clear + home, then re-establish dark bg + light fg defaults.
+    # The bg color persists on newly-written cells but empty rows need
+    # explicit painting — do a second pass with spaces to fill visible rows.
+    if _dark_screen_active:
+        # Paint the full screen with dark bg: clear, home, then fill rows
         print(_ANSI["clear"], end="", flush=True)
+        _paint_dark_background()
+        print(f"{_ANSI['clear']}{_ANSI['default_dark_bg']}{_ANSI['default_light_fg']}", end="", flush=True)
+    else:
+        print(_ANSI["clear"], end="", flush=True)
+
+
+# Track whether we've entered dark-screen mode so downstream helpers
+# (clear_screen, banner, step_header) can keep repainting the bg.
+_dark_screen_active = False
+
+
+def _terminal_size():
+    """Return (cols, rows) from the terminal, with safe defaults."""
+    try:
+        import shutil
+        sz = shutil.get_terminal_size(fallback=(80, 24))
+        return sz.columns, sz.lines
+    except Exception:
+        return 80, 24
+
+
+def _paint_dark_background():
+    """Fill the visible terminal with dark background color.
+
+    Works by writing a space to every cell of every visible row. After this,
+    subsequent content printed without explicit bg color will render on top
+    of the dark fill — as long as we keep the default_dark_bg SGR active.
+    """
+    cols, rows = _terminal_size()
+    bg = _ANSI["default_dark_bg"]
+    fg = _ANSI["default_light_fg"]
+    # Move to top-left, paint each row with spaces on dark bg
+    out = []
+    out.append("\033[H")  # cursor home
+    for r in range(rows):
+        out.append(f"\033[{r + 1};1H")  # row N col 1
+        out.append(f"{bg}{fg}{' ' * cols}")
+    out.append("\033[H")  # back to home
+    out.append(f"{bg}{fg}")  # leave default colors active for content
+    print("".join(out), end="", flush=True)
+
+
+def request_terminal_size(cols: int = 120, rows: int = 40):
+    """Ask the terminal emulator to resize itself (CSI 8 t).
+
+    Widely supported on xterm, gnome-terminal, some konsole versions.
+    IGNORED by iTerm2, Apple Terminal, Alacritty, kitty (they block resize
+    requests for security). If the request is blocked, we fall through silently;
+    the caller should check the actual size afterwards with _terminal_size().
+
+    Args:
+        cols: target columns (width)
+        rows: target rows (height)
+    """
+    if not _supports_ansi():
+        return
+    print(f"\033[8;{rows};{cols}t", end="", flush=True)
+
+
+def check_terminal_size(min_cols: int = 100, min_rows: int = 28) -> bool:
+    """Check if terminal meets minimum size recommendation. Returns True if OK.
+
+    Prints a user-visible warning if the terminal is smaller than recommended.
+    Wizard still works at smaller sizes — this is just a nudge.
+    """
+    cols, rows = _terminal_size()
+    if cols >= min_cols and rows >= min_rows:
+        return True
+    # Print a visible but non-blocking warning
+    warn_msg = (
+        f"Your terminal is {cols}x{rows}. "
+        f"Recommended: {min_cols}x{min_rows} or larger for best layout."
+    )
+    print()
+    print(color(f"  ⚠ {warn_msg}", "warning"))
+    print(color(f"    Try resizing your terminal window for a cleaner experience.", "muted"))
+    print()
+    return False
+
+
+def enter_dark_screen():
+    """Enter alt screen buffer + paint dark background.
+
+    Safe to call multiple times. Pairs with exit_dark_screen() — use try/finally
+    to ensure the alt buffer is released even if the wizard crashes.
+    Also requests a comfortable terminal size (120x40) — terminals that block
+    the resize request fall through silently; we warn on small terminals.
+    """
+    global _dark_screen_active
+    if not _supports_ansi():
+        return
+    print(_ANSI["alt_screen_on"], end="", flush=True)
+    # Request a larger size — ignored by terminals that block this for security
+    request_terminal_size(120, 40)
+    _dark_screen_active = True
+    _paint_dark_background()
+
+
+def exit_dark_screen():
+    """Restore original screen buffer and user's terminal colors."""
+    global _dark_screen_active
+    if not _supports_ansi():
+        return
+    # Reset SGR and leave alt buffer — restores the user's shell with its
+    # original terminal theme and scrollback intact.
+    print(f"{_ANSI['reset']}{_ANSI['alt_screen_off']}", end="", flush=True)
+    _dark_screen_active = False
 
 
 def step_header(step: int, total: int, title: str):

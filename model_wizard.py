@@ -5,32 +5,21 @@ import os
 import sys
 
 CONFIG_DIR = os.path.dirname(__file__)
-PRESETS_FILE = os.path.join(CONFIG_DIR, "model_presets.json")
+# Custom + override presets live in the user-scoped config dir so they survive
+# Starling reinstall to a different path. We keep the install dir as a legacy
+# read fallback for one release cycle so existing users aren't disrupted.
+_USER_CONFIG_DIR = os.path.expanduser("~/.config/starling")
+PRESETS_FILE = os.path.join(_USER_CONFIG_DIR, "model_presets.json")
+_LEGACY_PRESETS_FILE = os.path.join(CONFIG_DIR, "model_presets.json")
 
 # Built-in presets that ship with the app
 BUILTIN_PRESETS = {
     # --- OpenAI ---
-    "gpt-4o": {
-        "label": "GPT-4o",
-        "model": "openai/gpt-4o",
-        "base_url": "https://api.openai.com/v1",
-        "api_format": "openai",
-        "api_key_env": "OPENAI_API_KEY",
-        "provider": "OpenAI",
-        "extra": {},
-    },
-    "gpt-4o-mini": {
-        "label": "GPT-4o Mini",
-        "model": "openai/gpt-4o-mini",
-        "base_url": "https://api.openai.com/v1",
-        "api_format": "openai",
-        "api_key_env": "OPENAI_API_KEY",
-        "provider": "OpenAI",
-        "extra": {},
-    },
-    "o1": {
-        "label": "OpenAI o1",
-        "model": "openai/o1",
+    # Only GPT-5 and newer are offered. Older models (gpt-4o, gpt-4o-mini, o1,
+    # gpt-5-mini) are excluded by policy — users can still add custom presets.
+    "gpt-5": {
+        "label": "GPT-5",
+        "model": "openai/gpt-5",
         "base_url": "https://api.openai.com/v1",
         "api_format": "openai",
         "api_key_env": "OPENAI_API_KEY",
@@ -38,9 +27,10 @@ BUILTIN_PRESETS = {
         "extra": {},
     },
     # --- Anthropic (direct via LiteLLM native routing) ---
+    # Only Sonnet/Opus 4.5+ and Haiku 4.5+ offered by policy.
     "claude-sonnet": {
-        "label": "Claude Sonnet 4",
-        "model": "anthropic/claude-sonnet-4-20250514",
+        "label": "Claude Sonnet 4.6",
+        "model": "anthropic/claude-sonnet-4-6",
         "base_url": "",
         "api_format": "anthropic",
         "api_key_env": "ANTHROPIC_API_KEY",
@@ -57,8 +47,8 @@ BUILTIN_PRESETS = {
         "extra": {},
     },
     "claude-opus": {
-        "label": "Claude Opus 4",
-        "model": "anthropic/claude-opus-4-20250514",
+        "label": "Claude Opus 4.6",
+        "model": "anthropic/claude-opus-4-6",
         "base_url": "",
         "api_format": "anthropic",
         "api_key_env": "ANTHROPIC_API_KEY",
@@ -67,17 +57,17 @@ BUILTIN_PRESETS = {
     },
     # --- OpenRouter (one key, many models) ---
     "openrouter-claude": {
-        "label": "Claude Sonnet via OpenRouter",
-        "model": "openrouter/anthropic/claude-sonnet-4",
+        "label": "Claude Sonnet 4.6 via OpenRouter",
+        "model": "openrouter/anthropic/claude-sonnet-4-6",
         "base_url": "https://openrouter.ai/api/v1",
         "api_format": "openai",
         "api_key_env": "OPENROUTER_API_KEY",
         "provider": "OpenRouter",
         "extra": {},
     },
-    "openrouter-gpt4o": {
-        "label": "GPT-4o via OpenRouter",
-        "model": "openrouter/openai/gpt-4o",
+    "openrouter-gpt5": {
+        "label": "GPT-5 via OpenRouter",
+        "model": "openrouter/openai/gpt-5",
         "base_url": "https://openrouter.ai/api/v1",
         "api_format": "openai",
         "api_key_env": "OPENROUTER_API_KEY",
@@ -93,8 +83,74 @@ BUILTIN_PRESETS = {
         "provider": "OpenRouter",
         "extra": {},
     },
-    # --- xAI ---
-    "grok": {
+    # OpenRouter-hosted models from the OpenClaw curated collection:
+    # https://openrouter.ai/collections/openclaw
+    "openrouter-opus": {
+        "label": "Claude Opus 4.6 via OpenRouter",
+        "model": "openrouter/anthropic/claude-opus-4-6",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_format": "openai",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "provider": "OpenRouter",
+        "extra": {},
+    },
+    "openrouter-haiku": {
+        "label": "Claude Haiku 4.5 via OpenRouter",
+        "model": "openrouter/anthropic/claude-haiku-4-5",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_format": "openai",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "provider": "OpenRouter",
+        "extra": {},
+    },
+    "openrouter-kimi": {
+        "label": "Kimi K2.5 via OpenRouter",
+        "model": "openrouter/moonshotai/kimi-k2.5",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_format": "openai",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "provider": "OpenRouter",
+        "extra": {},
+    },
+    "openrouter-deepseek": {
+        "label": "DeepSeek V3.2 via OpenRouter",
+        "model": "openrouter/deepseek/deepseek-v3.2",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_format": "openai",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "provider": "OpenRouter",
+        "extra": {},
+    },
+    "openrouter-qwen": {
+        "label": "Qwen 3.6 Plus via OpenRouter",
+        "model": "openrouter/qwen/qwen3.6-plus",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_format": "openai",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "provider": "OpenRouter",
+        "extra": {},
+    },
+    "openrouter-gemini": {
+        "label": "Gemini 3 Flash via OpenRouter",
+        "model": "openrouter/google/gemini-3-flash-preview",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_format": "openai",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "provider": "OpenRouter",
+        "extra": {},
+    },
+    # --- xAI (direct) — all 4.1 through 4.2 variants from xAI's /v1/models catalog ---
+    # Grok 4.1 family — fast + reasoning + non-reasoning
+    "grok-4-1-fast-reasoning": {
+        "label": "Grok 4.1 Fast Reasoning",
+        "model": "openai/grok-4-1-fast-reasoning",
+        "base_url": "https://api.x.ai/v1",
+        "api_format": "openai",
+        "api_key_env": "XAI_API_KEY",
+        "provider": "xAI",
+        "extra": {"additional_drop_params": ["stop"]},
+    },
+    "grok-4-1-fast": {
         "label": "Grok 4.1 Fast",
         "model": "openai/grok-4-1-fast",
         "base_url": "https://api.x.ai/v1",
@@ -103,9 +159,56 @@ BUILTIN_PRESETS = {
         "provider": "xAI",
         "extra": {"additional_drop_params": ["stop"]},
     },
-    "grok-reasoning": {
-        "label": "Grok Reasoning",
-        "model": "openai/grok-4-1-fast-reasoning",
+    "grok-4-1-fast-non-reasoning": {
+        "label": "Grok 4.1 Fast (non-reasoning)",
+        "model": "openai/grok-4-1-fast-non-reasoning",
+        "base_url": "https://api.x.ai/v1",
+        "api_format": "openai",
+        "api_key_env": "XAI_API_KEY",
+        "provider": "xAI",
+        "extra": {"additional_drop_params": ["stop"]},
+    },
+    # Grok 4 Fast (no 4.1 suffix) — newer branch variants
+    "grok-4-fast-reasoning": {
+        "label": "Grok 4 Fast Reasoning",
+        "model": "openai/grok-4-fast-reasoning",
+        "base_url": "https://api.x.ai/v1",
+        "api_format": "openai",
+        "api_key_env": "XAI_API_KEY",
+        "provider": "xAI",
+        "extra": {"additional_drop_params": ["stop"]},
+    },
+    "grok-4-fast-non-reasoning": {
+        "label": "Grok 4 Fast (non-reasoning)",
+        "model": "openai/grok-4-fast-non-reasoning",
+        "base_url": "https://api.x.ai/v1",
+        "api_format": "openai",
+        "api_key_env": "XAI_API_KEY",
+        "provider": "xAI",
+        "extra": {"additional_drop_params": ["stop"]},
+    },
+    # Grok 4.20 — newest variants including multi-agent
+    "grok-4-20-reasoning": {
+        "label": "Grok 4.20 Reasoning",
+        "model": "openai/grok-4.20-0309-reasoning",
+        "base_url": "https://api.x.ai/v1",
+        "api_format": "openai",
+        "api_key_env": "XAI_API_KEY",
+        "provider": "xAI",
+        "extra": {"additional_drop_params": ["stop"]},
+    },
+    "grok-4-20-non-reasoning": {
+        "label": "Grok 4.20 (non-reasoning)",
+        "model": "openai/grok-4.20-0309-non-reasoning",
+        "base_url": "https://api.x.ai/v1",
+        "api_format": "openai",
+        "api_key_env": "XAI_API_KEY",
+        "provider": "xAI",
+        "extra": {"additional_drop_params": ["stop"]},
+    },
+    "grok-4-20-multi-agent": {
+        "label": "Grok 4.20 Multi-Agent",
+        "model": "openai/grok-4.20-multi-agent-0309",
         "base_url": "https://api.x.ai/v1",
         "api_format": "openai",
         "api_key_env": "XAI_API_KEY",
@@ -175,9 +278,9 @@ BUILTIN_PRESETS = {
     "qwen-plus": {
         "label": "Qwen 3.6 Plus",
         "model": "openai/qwen3.6-plus-2026-04-02",
-        "base_url": "https://dashscope-us.aliyuncs.com/compatible-mode/v1",
+        "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
         "api_format": "openai",
-        "api_key_env": "ALIBABA_API_KEY",
+        "api_key_env": "DASHSCOPE_API_KEY",
         "provider": "Alibaba",
         "extra": {},
     },
@@ -214,20 +317,44 @@ BUILTIN_PRESETS = {
 
 
 def load_presets():
-    """Load custom presets and merge with builtins."""
+    """Load custom presets and merge with builtins.
+
+    Reads from ~/.config/starling/model_presets.json. Falls back to a legacy
+    file in the install dir (one-time migration: if only the legacy file
+    exists, copy it forward on next save).
+    """
     presets = {k: {**v} for k, v in BUILTIN_PRESETS.items()}
-    if os.path.exists(PRESETS_FILE):
-        with open(PRESETS_FILE) as f:
-            custom = json.load(f)
-        presets.update(custom)
+    source = PRESETS_FILE if os.path.exists(PRESETS_FILE) else (
+        _LEGACY_PRESETS_FILE if os.path.exists(_LEGACY_PRESETS_FILE) else None
+    )
+    if source:
+        try:
+            with open(source) as f:
+                custom = json.load(f) or {}
+            presets.update(custom)
+        except (OSError, json.JSONDecodeError):
+            pass
     return presets
 
 
 def save_custom_presets(presets):
-    """Save only non-builtin presets."""
-    custom = {k: v for k, v in presets.items() if k not in BUILTIN_PRESETS}
-    with open(PRESETS_FILE, "w") as f:
-        json.dump(custom, f, indent=2)
+    """Save custom presets AND any builtin overrides that differ from default.
+
+    Writes to ~/.config/starling/model_presets.json, creating the directory
+    if needed. Keeps overrides of builtins so user edits survive across runs.
+    Use atomic tmp+rename to avoid partial files if the process is killed.
+    """
+    to_save = {}
+    for k, v in presets.items():
+        if k not in BUILTIN_PRESETS:
+            to_save[k] = v
+        elif v != BUILTIN_PRESETS[k]:
+            to_save[k] = v
+    os.makedirs(os.path.dirname(PRESETS_FILE), exist_ok=True)
+    tmp = PRESETS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(to_save, f, indent=2)
+    os.replace(tmp, PRESETS_FILE)
 
 
 def _env_file():

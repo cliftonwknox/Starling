@@ -276,6 +276,13 @@ class AgentPanel(Vertical):
 # === Main App ===
 
 class StarlingApp(App):
+    # Force a dark theme so the terminal background stays dark regardless
+    # of the user's terminal profile. 'tokyo-night' pairs well with the
+    # starling-inspired magenta/green/yellow palette (theme.py).
+    # Valid options: textual-dark, nord, gruvbox, catppuccin-mocha, dracula,
+    # tokyo-night, monokai, flexoki, solarized-dark, rose-pine, atom-one-dark.
+    theme = "tokyo-night"
+
     CSS = """
     Screen { layout: vertical; }
     #main-area { height: 1fr; }
@@ -613,28 +620,27 @@ class StarlingApp(App):
                         yield Input(placeholder="e.g., Detail-oriented with 10 years experience", id="agent-backstory-input")
                         yield Static("Available Models")
                         _all_presets = _load_model_presets()
-                        def _preset_available(k, v):
+                        # Cheap, non-blocking filter: include any preset that
+                        # either has its API key env var set OR is a known local
+                        # endpoint. We do NOT probe local servers here — that
+                        # used to fire urllib.request.urlopen with a 1s timeout
+                        # per local preset, freezing the TUI on startup if
+                        # LM Studio was slow to respond. Reachability checks
+                        # belong on a background refresh, not in compose().
+                        def _preset_likely_available(v):
                             if not isinstance(v, dict):
                                 return False
                             key_env = v.get("api_key_env")
                             if key_env:
                                 return bool(os.environ.get(key_env))
-                            base_url = v.get("base_url")
-                            if not isinstance(base_url, str) or not base_url:
-                                return False
-                            if "127.0.0.1" in base_url or "localhost" in base_url:
-                                import urllib.request
-                                try:
-                                    urllib.request.urlopen(base_url.rstrip("/") + "/models", timeout=1)
-                                    return True
-                                except Exception:
-                                    return False
-                            # Remote URL without api_key_env — can't verify access
-                            return False
+                            base_url = v.get("base_url") or ""
+                            return bool(base_url) and (
+                                "127.0.0.1" in base_url or "localhost" in base_url
+                            )
                         _active_presets = [
                             (f"{k} — {v['label']}", k)
                             for k, v in _all_presets.items()
-                            if _preset_available(k, v)
+                            if _preset_likely_available(v)
                         ]
                         yield Select(
                             _active_presets,
@@ -675,7 +681,14 @@ class StarlingApp(App):
             with TabPane("History", id="tab-history"):
                 yield RichLog(id="history-log", highlight=True, markup=True, wrap=True)
             with TabPane("Config", id="tab-config"):
-                yield RichLog(id="config-log", highlight=True, markup=True, wrap=True)
+                with Vertical():
+                    yield Horizontal(
+                        Button("Export backup (with secrets)", id="config-export-btn", variant="primary"),
+                        Button("Export share-safe (no secrets)", id="config-export-strip-btn"),
+                        Static("  [dim]saves to your backup directory[/]"),
+                        id="config-export-bar",
+                    )
+                    yield RichLog(id="config-log", highlight=True, markup=True, wrap=True)
             with TabPane("Queue", id="tab-queue"):
                 yield RichLog(id="queue-log", highlight=True, markup=True, wrap=True)
             with TabPane("Skills", id="tab-skills"):
@@ -713,6 +726,17 @@ class StarlingApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        # Request a comfortable terminal size on TUI start. Terminals that
+        # honor CSI 8 t (xterm, gnome-terminal) will resize; others (iTerm2,
+        # Terminal.app, kitty, alacritty) silently ignore it.
+        try:
+            import sys
+            if sys.stdout.isatty():
+                sys.stdout.write("\033[8;40;140t")
+                sys.stdout.flush()
+        except Exception:
+            pass
+
         if not self._agents_cfg:
             return
 
@@ -1100,16 +1124,13 @@ class StarlingApp(App):
             for key, p in presets.items():
                 label = p.get("label", key)
                 api_key = p.get("api_key_env")
-                key_status = ""
-                if api_key:
-                    if os.environ.get(api_key):
-                        key_status = " [green]ok[/]"
-                    else:
-                        key_status = " [red]no key[/]"
+                # Green if key env var set (or no key required for local); red otherwise.
+                has_key = (not api_key) or bool(os.environ.get(api_key))
+                color = "green" if has_key else "red"
                 users = [a["name"] for a in self._agents_cfg if a.get("preset") == key]
-                user_str = f" [dim]({', '.join(users)})[/]" if users else ""
+                user_str = f" ({', '.join(users)})" if users else ""
                 item = ListItem(
-                    Label(f"[bold]{key}[/] {label}{key_status}{user_str}"),
+                    Label(f"[{color}][bold]{key}[/bold] {label}{user_str}[/{color}]"),
                     name=key,
                 )
                 models_list.append(item)
@@ -1240,6 +1261,10 @@ class StarlingApp(App):
         elif event.button.id == "agent-new-btn":
             self._clear_agent_form()
 
+        elif event.button.id == "config-export-btn":
+            self._export_backup_from_tui(with_secrets=True)
+        elif event.button.id == "config-export-strip-btn":
+            self._export_backup_from_tui(with_secrets=False)
         elif event.button.id == "agent-template-btn":
             # Populate and show template selector
             from semantic_router import list_templates
@@ -1345,6 +1370,45 @@ class StarlingApp(App):
                 )
 
         threading.Thread(target=_do_test, daemon=True).start()
+
+    def _export_backup_from_tui(self, with_secrets: bool = True):
+        """Trigger a backup export and log the result to the Config tab."""
+        try:
+            log = self.query_one("#config-log", RichLog)
+        except Exception:
+            log = None
+
+        def _write(msg: str):
+            if log is not None:
+                log.write(msg)
+
+        _write("[cyan]Exporting backup...[/]")
+        try:
+            from setup_wizard import export_backup
+            from preferences import get_backup_dir
+            import datetime as _dt
+
+            # Build the path directly (no prompts in TUI context).
+            cfg = self._project_config or {}
+            name = (cfg.get("project", {}) or {}).get("name") or "project"
+            ts = _dt.datetime.now().strftime("%Y-%m-%d %H-%M")
+            suffix = "" if with_secrets else " (share-safe)"
+            out_path = os.path.join(
+                get_backup_dir(),
+                f"Starling export {name} {ts}{suffix}.starling",
+            )
+
+            result = export_backup(out_path=out_path, with_secrets=with_secrets)
+            if result:
+                _write(f"[green]✓ Exported to[/] {result}")
+                if with_secrets:
+                    _write("  [yellow]⚠ Contains API keys + tokens — file perms set to 600.[/]")
+                else:
+                    _write("  [dim]Secrets stripped. Safe to share.[/]")
+            else:
+                _write("[red]Export failed — see terminal for details.[/]")
+        except Exception as e:
+            _write(f"[red]Export error:[/] {e}")
 
     def _clear_model_form(self):
         """Clear model form fields for a new model."""

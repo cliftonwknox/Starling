@@ -30,9 +30,49 @@ _QUIT = object()
 _DONE = object()  # signals "another wizard path completed successfully — exit quietly"
 
 
+_ENV_KEY_RE = __import__("re").compile(r"^[A-Z_][A-Z0-9_]*$", __import__("re").IGNORECASE)
+
+
+def _sanitize_env_pair(key: str, value: str) -> tuple:
+    """Validate an env var name + value pair before writing to a `.env` file.
+
+    Returns (clean_key, clean_value) or (None, None) if the pair must be rejected.
+    Rejects:
+      - keys not matching POSIX env var name syntax (prevents shell-injection
+        via crafted .starling backups that supply malicious key names)
+      - values containing newline / carriage return / null bytes (prevents
+        injecting a second VAR=... line and overwriting unrelated env vars
+        like LD_PRELOAD or PATH)
+    """
+    if not isinstance(key, str) or not isinstance(value, str):
+        return None, None
+    key = key.strip()
+    if not _ENV_KEY_RE.match(key):
+        return None, None
+    if "\n" in value or "\r" in value or "\x00" in value:
+        return None, None
+    return key, value
+
+
+def _starling_version() -> str:
+    """Read the canonical version string. Tolerates a missing __version__
+    module so development checkouts without the file still work."""
+    try:
+        from __version__ import __version__
+        return __version__
+    except ImportError:
+        return "0.0.0-dev"
+
+# When True, 'q' is suppressed in nav prompts — caller uses 'b' to exit sub-flow.
+# Set inside model picker so users can't quit the whole wizard from a sub-step.
+_QUIT_SUPPRESSED = False
+
+
 def _nav_hint(skippable: bool = False) -> str:
     """Return the standard navigation hint line."""
-    parts = ["Enter = next", "b = back", "q = quit"]
+    parts = ["Enter = next", "b = back"]
+    if not _QUIT_SUPPRESSED:
+        parts.append("q = quit")
     if skippable:
         parts.insert(2, "s = skip")
     return theme.color("  (" + " | ".join(parts) + ")", "muted")
@@ -60,6 +100,9 @@ def _prompt_nav(label: str, default: str = "", hint: str = "", skippable: bool =
         if low == "b":
             return _BACK
         if low == "q":
+            if _QUIT_SUPPRESSED:
+                theme.warn("  Quit is disabled here — use 'b' to go back.")
+                continue
             # Confirm quit
             try:
                 confirm = input(theme.color("  Quit without saving? [y/N]: ", "warning")).strip().lower()
@@ -82,7 +125,7 @@ def _prompt_nav(label: str, default: str = "", hint: str = "", skippable: bool =
 
 def _pick_option(label: str, options: list, default_index: int = 0,
                  skippable: bool = False) -> object:
-    """Numbered option picker with nav support.
+    """Numbered option picker with nav support and pagination.
 
     Args:
         label: Prompt label (shown above the options).
@@ -91,22 +134,64 @@ def _pick_option(label: str, options: list, default_index: int = 0,
         skippable: Whether 's' skip is allowed.
 
     Returns:
-        The selected value (second element of tuple, or the string if list of strings),
-        or _BACK/_SKIP/_QUIT sentinel.
+        The selected value, or _BACK/_SKIP/_QUIT sentinel.
+
+    Pagination: when options exceed terminal height, paginate. Extra commands:
+        n — next page
+        p — previous page
+        g — jump to page containing the default
     """
     # Normalize to (display, value) tuples
     norm = [(o, o) if isinstance(o, str) else o for o in options]
 
+    # Reserve rows for: prompt header (3) + nav hint (2) + input prompt (2)
+    import shutil
+    _, term_rows = shutil.get_terminal_size(fallback=(80, 24))
+    page_size = max(5, term_rows - 8)
+    total_pages = (len(norm) + page_size - 1) // page_size
+    # Start on the page that contains the default
+    cur_page = default_index // page_size if total_pages > 0 else 0
+
     while True:
+        start = cur_page * page_size
+        end = min(start + page_size, len(norm))
         print()
-        for i, (disp, _) in enumerate(norm, 1):
-            marker = theme.color("  *", "accent") if (i - 1) == default_index else ""
-            print(f"    {theme.color(str(i), 'highlight')}) {disp}{marker}")
+        if total_pages > 1:
+            print(theme.color(
+                f"  Page {cur_page + 1}/{total_pages}  "
+                f"(showing {start + 1}–{end} of {len(norm)})",
+                "muted",
+            ))
+        for i in range(start, end):
+            disp, _val = norm[i]
+            num = i + 1
+            marker = theme.color("  ← default", "accent") if i == default_index else ""
+            print(f"    {theme.color(f'{num:>2}', 'highlight')}) {disp}{marker}")
 
         default_str = str(default_index + 1) if norm else ""
+        nav_extras = ""
+        if total_pages > 1:
+            nav_extras = theme.color(
+                f"  (n/p = next/prev page, or type a number 1–{len(norm)})",
+                "muted",
+            )
+            print(nav_extras)
+
         raw = _prompt_nav(label, default=default_str, skippable=skippable)
         if raw in (_BACK, _SKIP, _QUIT):
             return raw
+        # Pagination commands
+        if isinstance(raw, str):
+            lraw = raw.lower().strip()
+            if lraw == "n" and total_pages > 1:
+                cur_page = (cur_page + 1) % total_pages
+                continue
+            if lraw == "p" and total_pages > 1:
+                cur_page = (cur_page - 1) % total_pages
+                continue
+            if lraw == "g" and total_pages > 1:
+                cur_page = default_index // page_size
+                continue
         try:
             idx = int(raw) - 1
             if 0 <= idx < len(norm):
@@ -213,9 +298,27 @@ def _banner(title):
 
 def run_setup():
     """Main setup wizard entry point — pre-start menu → path picker → dispatch."""
+    # Enter alt screen buffer with dark background painted. Guarantees we
+    # restore the terminal on any exit path (try/finally wraps the whole body).
+    theme.enter_dark_screen()
+    try:
+        _run_setup_body()
+    finally:
+        theme.exit_dark_screen()
+
+
+def _run_setup_body():
     theme.clear_screen()
     theme.banner("Starling Setup")
     print(f"  {theme.color('Welcome to Starling', 'primary', bold=True)} — let's get your crew configured.\n")
+    # Warn if the terminal is smaller than recommended. The resize request was
+    # already sent in enter_dark_screen(); this catches the case where the
+    # terminal ignored it (iTerm2, Apple Terminal, Alacritty, kitty do).
+    if not theme.check_terminal_size(min_cols=100, min_rows=28):
+        try:
+            input(theme.color("  Press Enter to continue anyway...", "muted"))
+        except (EOFError, KeyboardInterrupt):
+            return
 
     # Pre-start menu
     while True:
@@ -423,100 +526,886 @@ def _step_template(state: dict):
 
 
 def _step_model(state: dict):
-    """Step 3: pick a model — filtered to available ones only."""
+    """Unified model picker.
+
+    Two-level UX:
+      1. Provider Overview — user configures any number of providers (key,
+         base URL, models to enable). Auto-launches if no providers configured yet.
+      2. Model Pick — filtered list of models from configured providers only.
+
+    Quit is available on the main model-pick page, but suppressed inside
+    sub-flows (provider overview, API key entry, custom model form).
+    Returns the model preset key, or a nav sentinel.
+    """
+    # Ensure at least one provider is configured before we can pick a model.
+    if not state.get("configured_providers"):
+        result = _provider_overview(state)
+        if result in (_BACK, _SKIP, _QUIT):
+            return result
+
+    return _pick_model_from_configured(state)
+
+
+def _provider_overview(state: dict):
+    """Provider overview menu. User picks providers to configure.
+
+    Quit is suppressed in this sub-flow; use 'b' to back out to the main pick.
+    Runs until user hits 'd' (done) or a nav sentinel. Returns the done
+    signal (empty string) or nav sentinel.
+    """
+    global _QUIT_SUPPRESSED
+    prev_suppressed = _QUIT_SUPPRESSED
+    _QUIT_SUPPRESSED = True
+    try:
+        return _provider_overview_body(state)
+    finally:
+        _QUIT_SUPPRESSED = prev_suppressed
+
+
+def _provider_overview_body(state: dict):
     from model_wizard import load_presets
     all_presets = load_presets()
-    available = [(k, v) for k, v in all_presets.items() if _preset_available(k, v)]
 
-    if not available:
-        theme.warn("No model presets have valid API keys or are reachable locally.")
-        print("    Set API keys in your environment, or start LM Studio/Ollama, then re-run setup.")
-        print("    Continuing with all presets — you'll need to add a key afterwards.")
+    # Group presets by provider
+    providers: dict = {}  # prov_label -> list of (key, preset_dict)
+    for k, v in all_presets.items():
+        providers.setdefault(v.get("provider", "Other"), []).append((k, v))
+
+    # Alphabetical for predictability, Custom last
+    prov_order = sorted(providers.keys(), key=lambda p: (p == "Custom", p.lower()))
+
+    # If "configured_providers" doesn't exist yet, auto-detect via env/reachability
+    # so xAI (if key is in env) shows as ready without the user having to open it.
+    state.setdefault("configured_providers", set())
+    cfg = state["configured_providers"]
+    for prov_name in prov_order:
+        has_ready = any(
+            (v.get("api_key_env") and os.environ.get(v["api_key_env"]))
+            or (not v.get("api_key_env") and _preset_available(k, v))
+            for k, v in providers[prov_name]
+        )
+        if has_ready:
+            cfg.add(prov_name)
+
+    while True:
+        theme.clear_screen()
+        theme.step_header(3, 5, "Configure Providers")
+        print("  Pick a provider to configure (enter its number).")
+        print("  Providers with a configured API key or reachable local server are")
+        print("  marked [ready] — those models are immediately usable.\n")
+
+        options = []
+        for i, prov_name in enumerate(prov_order, 1):
+            presets = providers[prov_name]
+            # Count ready models in this provider
+            ready_count = sum(
+                1 for k, v in presets
+                if (v.get("api_key_env") and os.environ.get(v["api_key_env"]))
+                or (not v.get("api_key_env") and _preset_available(k, v))
+            )
+            if prov_name in cfg and ready_count > 0:
+                status = theme.color(f"[{ready_count} model(s) ready]", "success")
+            elif prov_name in cfg:
+                status = theme.color("[configured, no key yet]", "warning")
+            else:
+                status = theme.color("[not configured]", "muted")
+            label = theme.color(prov_name, "accent", bold=True)
+            print(f"  {theme.color(f'{i:>2}', 'highlight')}) {label:40s} {status}")
+
+        custom_prov_num = len(prov_order) + 1
+        custom_model_num = len(prov_order) + 2
+        print(f"\n  {theme.color(f'{custom_prov_num:>2}', 'highlight')}) "
+              + theme.color("+ Add a custom provider", "highlight", bold=True))
+        print(f"  {theme.color(f'{custom_model_num:>2}', 'highlight')}) "
+              + theme.color("+ Add a custom model to an existing provider", "highlight", bold=True))
+
+        ready_total = sum(1 for p in cfg if providers.get(p))
+        print()
+        done_hint = (
+            theme.color("  d) Done — continue", "success", bold=True)
+            if cfg else
+            theme.color("  d) Done — continue (no providers configured — agent will have no model!)", "warning")
+        )
+        print(done_hint)
+        print(_nav_hint())
+
+        try:
+            raw = input(theme.color("\n  Choice: ", "highlight")).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return _QUIT
+
+        if raw == "q":
+            return _QUIT
+        if raw == "b":
+            return _BACK
+        if raw == "d":
+            if not cfg:
+                theme.warn("  No providers configured. Are you sure? [y/N]")
+                try:
+                    confirm = input("  > ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    return _QUIT
+                if confirm != "y":
+                    continue
+            return ""  # done signal
+
+        # Parse numeric
+        try:
+            n = int(raw)
+        except ValueError:
+            theme.error("  Enter a number, 'd' for done, 'b' back, or 'q' quit.")
+            try:
+                input(theme.color("  Press Enter to continue...", "muted"))
+            except (EOFError, KeyboardInterrupt):
+                return _QUIT
+            continue
+
+        if 1 <= n <= len(prov_order):
+            prov_name = prov_order[n - 1]
+            r = _configure_provider(prov_name, providers[prov_name], state)
+            if r is _QUIT:
+                return _QUIT
+            # Refresh grouping since custom additions may have changed things
+            all_presets = load_presets()
+            providers = {}
+            for k, v in all_presets.items():
+                providers.setdefault(v.get("provider", "Other"), []).append((k, v))
+            prov_order = sorted(providers.keys(), key=lambda p: (p == "Custom", p.lower()))
+            continue
+        if n == custom_prov_num:
+            r = _add_custom_provider_flow(state)
+            if r is _QUIT:
+                return _QUIT
+            # Refresh
+            all_presets = load_presets()
+            providers = {}
+            for k, v in all_presets.items():
+                providers.setdefault(v.get("provider", "Other"), []).append((k, v))
+            prov_order = sorted(providers.keys(), key=lambda p: (p == "Custom", p.lower()))
+            continue
+        if n == custom_model_num:
+            r = _add_custom_model_flow()
+            if r is not None:
+                # User completed — mark provider (from the added preset) as configured
+                all_presets = load_presets()
+                preset = all_presets.get(r)
+                if preset:
+                    cfg.add(preset.get("provider", "Custom"))
+                providers = {}
+                for k, v in all_presets.items():
+                    providers.setdefault(v.get("provider", "Other"), []).append((k, v))
+                prov_order = sorted(providers.keys(), key=lambda p: (p == "Custom", p.lower()))
+            continue
+
+        theme.error(f"  Number out of range.")
+        try:
+            input(theme.color("  Press Enter to continue...", "muted"))
+        except (EOFError, KeyboardInterrupt):
+            return _QUIT
+
+
+def _configure_provider(prov_name: str, presets: list, state: dict):
+    """Configure one provider: show its models, prompt for key or base URL.
+
+    Built-in preset fields are shown as reference ("Typical:") but the user
+    types the actual value — nothing is auto-filled silently. Leaving a field
+    blank preserves whatever's already set (env var or existing preset).
+
+    Returns _QUIT on explicit quit, empty string on completion/back.
+    """
+    from model_wizard import load_presets, save_custom_presets
+    from typing import Optional as _Opt
+
+    while True:
+        theme.clear_screen()
+        theme.step_header(3, 5, f"Configure {prov_name}")
+
+        # Show existing models under this provider
+        print(f"  {theme.color('Models registered for this provider:', 'primary', bold=True)}\n")
+        for k, v in presets:
+            model_id = v.get("model", "")
+            key_env = v.get("api_key_env")
+            if key_env:
+                badge = (theme.color("[key set]", "success")
+                         if os.environ.get(key_env)
+                         else theme.color("[needs key]", "warning"))
+            else:
+                badge = (theme.color("[reachable]", "success")
+                         if _preset_available(k, v)
+                         else theme.color("[not reachable]", "error"))
+            print(f"    • {theme.color(v.get('label', k), 'accent'):30s} "
+                  f"{theme.color(model_id, 'muted'):42s} {badge}")
+
+        # Show what the provider needs
+        sample = presets[0][1] if presets else {}
+        typical_url = sample.get("base_url", "")
+        typical_env = sample.get("api_key_env", "")
+        is_local = not typical_env and typical_url and (
+            "127.0.0.1" in typical_url or "localhost" in typical_url
+        )
+
+        print()
+        print(f"  {theme.color('Configuration:', 'primary', bold=True)}\n")
+
+        if typical_env:
+            cur_env_val = os.environ.get(typical_env)
+            if cur_env_val:
+                print(f"    Env var {theme.color(typical_env, 'highlight')}: "
+                      + theme.color("set in environment ✓", "success"))
+            else:
+                print(f"    Env var {theme.color(typical_env, 'highlight')}: "
+                      + theme.color("not set", "warning"))
+        else:
+            print(f"    No API key required (local provider).")
+
+        print(f"    Base URL reference: {theme.color(typical_url or '(not set)', 'muted')}")
+        print()
+
+        # Show edit/delete options when this provider has any user-added (custom)
+        # presets. Built-in presets are never editable/deletable from here.
+        from model_wizard import BUILTIN_PRESETS
+        custom_presets = [(k, v) for k, v in presets if k not in BUILTIN_PRESETS]
+        has_custom = len(custom_presets) > 0
+        # Whole-provider delete is only offered if ALL presets under this provider
+        # are custom (no built-ins to preserve).
+        is_custom_provider = has_custom and all(k not in BUILTIN_PRESETS for k, _ in presets)
+
+        # Commands
+        print(f"  {theme.color('k', 'highlight')}) Enter / update API key")
+        print(f"  {theme.color('u', 'highlight')}) Set / override base URL")
+        print(f"  {theme.color('m', 'highlight')}) Add another model ID to this provider")
+        if is_local:
+            print(f"  {theme.color('t', 'highlight')}) Test connection")
+        # Edit any preset (built-in or custom). Overrides are kept on save.
+        if presets:
+            print(f"  {theme.color('e', 'highlight')}) Edit a model's details (including built-ins)")
+        if has_custom:
+            if is_custom_provider:
+                print(f"  {theme.color('x', 'error')}) Delete this custom provider (removes all its models)")
+            else:
+                print(f"  {theme.color('x', 'error')}) Delete a custom model from this provider")
+        # Reset a built-in override back to defaults
+        has_overridden_builtin = any(
+            k in BUILTIN_PRESETS and v != BUILTIN_PRESETS[k]
+            for k, v in presets
+        )
+        if has_overridden_builtin:
+            print(f"  {theme.color('r', 'highlight')}) Reset a built-in model to its default")
+        print(f"  {theme.color('b', 'highlight')}) Back to providers")
+        if not _QUIT_SUPPRESSED:
+            print(f"  {theme.color('q', 'highlight')}) Quit")
+
+        try:
+            choice = input(theme.color("\n  Choice: ", "highlight")).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return _QUIT
+
+        if choice == "b" or choice == "":
+            state.setdefault("configured_providers", set()).add(prov_name)
+            return ""
+        if choice == "q":
+            if _QUIT_SUPPRESSED:
+                theme.warn("  Quit is disabled here — use 'b' to go back.")
+                try:
+                    input(theme.color("  Press Enter to continue...", "muted"))
+                except (EOFError, KeyboardInterrupt):
+                    pass
+                continue
+            return _QUIT
+
+        if choice == "x" and has_custom:
+            if is_custom_provider:
+                theme.warn(f"\n  Delete custom provider '{prov_name}' and all its models?")
+                for k, _v in custom_presets:
+                    print(f"    • {k}")
+                try:
+                    confirm = input(theme.color("  Type 'delete' to confirm: ", "error")).strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    continue
+                if confirm != "delete":
+                    theme.muted("  Cancelled.")
+                    continue
+                all_presets = load_presets()
+                for k, _v in custom_presets:
+                    all_presets.pop(k, None)
+                custom_only = {k: v for k, v in all_presets.items() if k not in BUILTIN_PRESETS}
+                save_custom_presets(custom_only)
+                state.setdefault("configured_providers", set()).discard(prov_name)
+                theme.success(f"  Deleted provider '{prov_name}'.")
+                try:
+                    input(theme.color("  Press Enter to continue...", "muted"))
+                except (EOFError, KeyboardInterrupt):
+                    pass
+                return ""
+            else:
+                # Per-preset delete
+                print("\n  Pick a custom model to delete:")
+                for i, (k, v) in enumerate(custom_presets, 1):
+                    print(f"    {theme.color(f'{i:>2}', 'highlight')}) {v.get('label', k)} ({v.get('model','')})")
+                try:
+                    pick = input(theme.color("  Number (or blank to cancel): ", "highlight")).strip()
+                except (EOFError, KeyboardInterrupt):
+                    continue
+                if not pick:
+                    continue
+                try:
+                    idx = int(pick) - 1
+                except ValueError:
+                    theme.error("  Not a number.")
+                    continue
+                if not (0 <= idx < len(custom_presets)):
+                    theme.error("  Out of range.")
+                    continue
+                del_key, _del_preset = custom_presets[idx]
+                try:
+                    confirm = input(theme.color(f"  Type 'delete' to delete '{del_key}': ", "error")).strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    continue
+                if confirm != "delete":
+                    theme.muted("  Cancelled.")
+                    continue
+                all_presets = load_presets()
+                all_presets.pop(del_key, None)
+                custom_only = {k: v for k, v in all_presets.items() if k not in BUILTIN_PRESETS}
+                save_custom_presets(custom_only)
+                theme.success(f"  Deleted '{del_key}'.")
+                presets = [(k, v) for k, v in load_presets().items()
+                           if v.get("provider", "Other") == prov_name]
+                try:
+                    input(theme.color("  Press Enter to continue...", "muted"))
+                except (EOFError, KeyboardInterrupt):
+                    pass
+                continue
+
+        if choice == "r" and has_overridden_builtin:
+            overridden = [(k, v) for k, v in presets
+                          if k in BUILTIN_PRESETS and v != BUILTIN_PRESETS[k]]
+            print("\n  Pick a built-in model to reset to default:")
+            for i, (k, v) in enumerate(overridden, 1):
+                print(f"    {theme.color(f'{i:>2}', 'highlight')}) {v.get('label', k)} ({v.get('model','')})")
+            try:
+                pick = input(theme.color("  Number (or blank to cancel): ", "highlight")).strip()
+            except (EOFError, KeyboardInterrupt):
+                continue
+            if not pick:
+                continue
+            try:
+                idx = int(pick) - 1
+            except ValueError:
+                theme.error("  Not a number.")
+                continue
+            if not (0 <= idx < len(overridden)):
+                theme.error("  Out of range.")
+                continue
+            reset_key, _ = overridden[idx]
+            all_presets = load_presets()
+            all_presets[reset_key] = dict(BUILTIN_PRESETS[reset_key])
+            save_custom_presets(all_presets)
+            theme.success(f"  Reset '{reset_key}' to built-in defaults.")
+            presets = [(k, v) for k, v in load_presets().items()
+                       if v.get("provider", "Other") == prov_name]
+            try:
+                input(theme.color("  Press Enter to continue...", "muted"))
+            except (EOFError, KeyboardInterrupt):
+                pass
+            continue
+
+        if choice == "e" and presets:
+            edit_pool = presets  # built-in or custom; both allowed
+            print("\n  Pick a model to edit:")
+            for i, (k, v) in enumerate(edit_pool, 1):
+                print(f"    {theme.color(f'{i:>2}', 'highlight')}) {v.get('label', k)} ({v.get('model','')})")
+            try:
+                pick = input(theme.color("  Number (or blank to cancel): ", "highlight")).strip()
+            except (EOFError, KeyboardInterrupt):
+                continue
+            if not pick:
+                continue
+            try:
+                idx = int(pick) - 1
+            except ValueError:
+                theme.error("  Not a number.")
+                continue
+            if not (0 <= idx < len(edit_pool)):
+                theme.error("  Out of range.")
+                continue
+            edit_key, edit_preset = edit_pool[idx]
+            all_presets = load_presets()
+            p = dict(all_presets.get(edit_key, edit_preset))
+
+            def _edit(label, current, required=True):
+                try:
+                    v = input(theme.prompt_text(label, default=str(current or ""))).strip()
+                except (EOFError, KeyboardInterrupt):
+                    return current
+                if not v:
+                    return current
+                return v
+
+            p["label"] = _edit("Display label", p.get("label", edit_key))
+            p["model"] = _edit("Model ID", p.get("model", ""))
+            p["base_url"] = _edit("Base URL", p.get("base_url", ""))
+            p["api_key_env"] = _edit("API key env var", p.get("api_key_env", "") or "")
+            fmt = _edit("API format (openai / anthropic)", p.get("api_format", "openai"))
+            p["api_format"] = "anthropic" if fmt.strip().lower() == "anthropic" else "openai"
+            all_presets[edit_key] = p
+            custom_only = {k: v for k, v in all_presets.items() if k not in BUILTIN_PRESETS}
+            save_custom_presets(custom_only)
+            theme.success(f"  Updated '{edit_key}'.")
+            # Refresh the presets list for redraw
+            presets = [(k, v) for k, v in load_presets().items()
+                       if v.get("provider", "Other") == prov_name]
+            try:
+                input(theme.color("  Press Enter to continue...", "muted"))
+            except (EOFError, KeyboardInterrupt):
+                pass
+            continue
+
+        if choice == "k":
+            if not typical_env:
+                theme.warn("  This provider doesn't use an API key.")
+                try:
+                    input(theme.color("  Press Enter to continue...", "muted"))
+                except (EOFError, KeyboardInterrupt):
+                    return _QUIT
+                continue
+            # Use the provider's standard env var name directly. Users don't
+            # need to think about this — it's just where the key gets saved.
+            env_var = typical_env
+            print(f"\n  {theme.color(prov_name, 'accent', bold=True)} API key")
+            theme.muted(f"  (Will be saved as {env_var} in your work dir .env)")
+            try:
+                key_val = input(theme.color(
+                    f"\n  Paste your API key: ", "highlight")).strip()
+            except (EOFError, KeyboardInterrupt):
+                return _QUIT
+
+            if not key_val:
+                # Empty input — do NOT mark provider configured, warn user clearly.
+                theme.error(f"  No value entered for {env_var}. Nothing saved.")
+                theme.muted("  Try 'k' again. If paste failed, try typing the key directly.")
+                try:
+                    input(theme.color("  Press Enter to continue...", "muted"))
+                except (EOFError, KeyboardInterrupt):
+                    return _QUIT
+                continue
+
+            # Defensive: warn if pasted value looks wrong (contains = or whitespace)
+            if "=" in key_val and key_val.startswith(env_var):
+                # User pasted "NVIDIA_API_KEY=..." — strip the prefix
+                suffix = key_val.split("=", 1)[1].strip()
+                if suffix:
+                    key_val = suffix
+                    theme.muted(f"  (Stripped '{env_var}=' prefix from your paste.)")
+            if " " in key_val or "\t" in key_val:
+                theme.warn(f"  Value contains whitespace — keys usually don't. Saved anyway.")
+
+            # Persist: set in current process env + stage for .env write on finalize
+            os.environ[env_var] = key_val
+            state.setdefault("api_keys_pending", {})[env_var] = key_val
+            state.setdefault("configured_providers", set()).add(prov_name)
+            # Visible confirmation with character count so user can verify
+            masked = key_val[:6] + "..." + key_val[-4:] if len(key_val) > 12 else "*" * len(key_val)
+            theme.success(
+                f"  {env_var} saved ({len(key_val)} chars, {masked}). "
+                f"Written to .env on finalize."
+            )
+            try:
+                input(theme.color("  Press Enter to continue...", "muted"))
+            except (EOFError, KeyboardInterrupt):
+                return _QUIT
+            continue
+
+        if choice == "u":
+            print(f"\n  Typical base URL: {theme.color(typical_url or '(none)', 'muted')}")
+            new_url = input(theme.color(
+                f"  Base URL (empty to keep current): ", "highlight")).strip()
+            if new_url:
+                state.setdefault("provider_url_overrides", {})[prov_name] = new_url
+                theme.success(f"  Base URL override set to {new_url}")
+                theme.muted("  (Applies at agent runtime; existing presets keep their URL in the catalog.)")
+            try:
+                input(theme.color("  Press Enter to continue...", "muted"))
+            except (EOFError, KeyboardInterrupt):
+                return _QUIT
+            continue
+
+        if choice == "m":
+            new_preset_key = _add_custom_model_flow(default_provider=prov_name)
+            if new_preset_key:
+                # Refresh presets list for this provider
+                all_presets = load_presets()
+                presets = [(k, v) for k, v in all_presets.items()
+                           if v.get("provider") == prov_name]
+                state.setdefault("configured_providers", set()).add(prov_name)
+            continue
+
+        if choice == "t" and is_local:
+            test_url = state.get("provider_url_overrides", {}).get(prov_name, typical_url)
+            try:
+                import urllib.request
+                urllib.request.urlopen(test_url.rstrip("/") + "/models", timeout=3)
+                theme.success(f"  Connection to {test_url} OK")
+                state.setdefault("configured_providers", set()).add(prov_name)
+            except Exception as e:
+                theme.error(f"  Connection failed: {str(e)[:80]}")
+                theme.muted("  Is LM Studio / Ollama running? Check the base URL.")
+            try:
+                input(theme.color("  Press Enter to continue...", "muted"))
+            except (EOFError, KeyboardInterrupt):
+                return _QUIT
+            continue
+
+        theme.error(f"  Unknown choice: {choice}")
+        try:
+            input(theme.color("  Press Enter to continue...", "muted"))
+        except (EOFError, KeyboardInterrupt):
+            return _QUIT
+
+
+def _add_custom_provider_flow(state: dict):
+    """Register a brand-new provider with its own base URL and env var.
+
+    After saving, the user can then add models to it via option 15.
+    """
+    theme.clear_screen()
+    theme.banner("Add a custom provider")
+    print("  A provider is just a name + base URL + optional API key env var.")
+    print("  You'll add the provider first, then its models.\n")
+
+    name = input(theme.color(
+        "  Provider display name (e.g. 'MyProvider'): ", "highlight")).strip()
+    if not name:
+        theme.muted("  Cancelled.")
+        try:
+            input(theme.color("  Press Enter to continue...", "muted"))
+        except (EOFError, KeyboardInterrupt):
+            return _QUIT
+        return ""
+
+    print(f"\n  Typical base URL formats:")
+    theme.muted("    https://api.example.com/v1        (cloud)")
+    theme.muted("    http://127.0.0.1:port/v1          (local)")
+    base_url = input(theme.color("\n  Base URL: ", "highlight")).strip()
+
+    print(f"\n  Typical env var naming: PROVIDERNAME_API_KEY (all caps)")
+    env_var = input(theme.color(
+        "  API key env var (blank if none needed): ", "highlight")).strip()
+
+    key_val = ""
+    if env_var:
+        key_val = input(theme.color(
+            f"  Paste {env_var} value (empty to skip): ", "highlight")).strip()
+
+    # Save as a placeholder preset so the provider appears in the overview.
+    # Actual models for it get added via "Add custom model" with this provider name.
+    # The preset is a shell with a placeholder model entry.
+    from model_wizard import load_presets, save_custom_presets
+    all_presets = load_presets()
+    placeholder_key = f"{name.lower().replace(' ', '-')}-placeholder"
+    if placeholder_key not in all_presets:
+        all_presets[placeholder_key] = {
+            "label": f"{name} (placeholder — add a real model)",
+            "model": "replace-with-real-model-id",
+            "base_url": base_url,
+            "api_format": "openai",
+            "api_key_env": env_var or None,
+            "provider": name,
+            "extra": {},
+        }
+        save_custom_presets(all_presets)
+
+    if key_val and env_var:
+        os.environ[env_var] = key_val
+        state.setdefault("api_keys_pending", {})[env_var] = key_val
+
+    state.setdefault("configured_providers", set()).add(name)
+    theme.success(f"  Provider '{name}' added. Next, add models to it via option 15.")
+    try:
+        input(theme.color("  Press Enter to continue...", "muted"))
+    except (EOFError, KeyboardInterrupt):
+        return _QUIT
+    return ""
+
+
+def _pick_model_from_configured(state: dict):
+    """Pick a specific model from the configured providers' catalogs."""
+    from model_wizard import load_presets
+    all_presets = load_presets()
+    cfg = state.get("configured_providers") or set()
+
+    # Filter to only configured providers (if any)
+    if cfg:
+        available = [(k, v) for k, v in all_presets.items()
+                     if v.get("provider") in cfg]
+    else:
         available = list(all_presets.items())
 
+    # Drop placeholder entries (custom providers without real models yet)
+    available = [(k, v) for k, v in available
+                 if not k.endswith("-placeholder")]
+
+    if not available:
+        theme.warn("  No models available. Let's configure a provider first.")
+        try:
+            input(theme.color("  Press Enter to continue...", "muted"))
+        except (EOFError, KeyboardInterrupt):
+            return _QUIT
+        return _provider_overview(state) or _pick_model_from_configured(state)
+
+    theme.clear_screen()
+    theme.step_header(4, 5, "Pick your agent's model")
+    print("  Choose which model your agent will use for chat completions.\n")
+
     options = []
-    for k, v in available:
-        key_env = v.get("api_key_env")
-        key_status = ""
-        if key_env and os.environ.get(key_env):
-            key_status = theme.color(" [key set]", "success")
-        elif not key_env:
-            key_status = theme.color(" [local]", "accent")
-        display = f"{k:18s} {v.get('label', ''):30s}{key_status}"
+    for k, v in sorted(available, key=lambda kv: (kv[1].get("provider", ""), kv[0])):
+        prov = v.get("provider", "?")
+        label = v.get("label", k)
+        model_id = v.get("model", "")
+        display = (
+            f"{theme.color(label, 'accent', bold=True):30s} "
+            f"{theme.color(f'({prov})', 'muted'):20s} "
+            f"{theme.color(model_id, 'muted')}"
+        )
         options.append((display, k))
 
-    print("  Pick the LLM that will power your agent.\n")
+    options.append((
+        theme.color("r) Re-configure providers", "highlight"),
+        "_reconfig",
+    ))
+
     print(_nav_hint())
     default_idx = 0
     if state.get("model_preset"):
-        for i, (_, k) in enumerate(options):
-            if k == state["model_preset"]:
+        for i, (_, v) in enumerate(options):
+            if v == state["model_preset"]:
                 default_idx = i
                 break
 
     result = _pick_option("Model", options, default_index=default_idx)
     if result in (_BACK, _SKIP, _QUIT):
         return result
+    if result == "_reconfig":
+        r = _provider_overview(state)
+        if r in (_BACK, _QUIT):
+            return r
+        return _pick_model_from_configured(state)
+
     state["model_preset"] = result
-    state["_available_presets"] = dict(available)  # cached for api_key step
+    state["_available_presets"] = dict(all_presets)
     return result
 
 
+def _add_custom_model_flow(default_provider: Optional[str] = None) -> Optional[str]:
+    """Mini-flow to register a new custom model preset mid-wizard.
+
+    Quit is suppressed — user can only save or back out.
+    Prompts for name, label, model ID, base URL, API format, env var name,
+    then saves to model_presets.json via model_wizard.save_custom_presets().
+    If default_provider is set, uses it as the provider name (no prompt).
+    Returns the new preset key on success, or None if the user aborted.
+    """
+    global _QUIT_SUPPRESSED
+    prev_suppressed = _QUIT_SUPPRESSED
+    _QUIT_SUPPRESSED = True
+    try:
+        return _add_custom_model_flow_body(default_provider)
+    finally:
+        _QUIT_SUPPRESSED = prev_suppressed
+
+
+def _add_custom_model_flow_body(default_provider: Optional[str] = None) -> Optional[str]:
+    theme.clear_screen()
+    theme.banner("Add a custom model")
+    print("  Define a new OpenAI-compatible or Anthropic-compatible model.")
+    print("  You can reference any provider with a standard API endpoint.\n")
+    print(_nav_hint())
+
+    name = _prompt_nav("Preset name (short, lowercase, no spaces)",
+                       hint="e.g. my-grok, local-llama", required=True)
+    if name in (_BACK, _QUIT, _SKIP):
+        return None
+    name = name.lower().replace(" ", "-")
+
+    # Check collision with builtins
+    from model_wizard import load_presets, save_custom_presets, BUILTIN_PRESETS
+    existing = load_presets()
+    if name in existing:
+        theme.error(f"Preset '{name}' already exists. Pick a different name.")
+        try:
+            input("  Press Enter to continue...")
+        except (EOFError, KeyboardInterrupt):
+            return None
+        return _add_custom_model_flow()
+
+    label = _prompt_nav("Display label",
+                        default=name.replace("-", " ").title(), required=True)
+    if label in (_BACK, _QUIT, _SKIP):
+        return None
+
+    model_id = _prompt_nav("Full model ID",
+                           hint="e.g. openai/gpt-4o, anthropic/claude-sonnet-4-20250514",
+                           required=True)
+    if model_id in (_BACK, _QUIT, _SKIP):
+        return None
+
+    base_url = _prompt_nav("API base URL",
+                           default="https://api.openai.com/v1",
+                           required=True)
+    if base_url in (_BACK, _QUIT, _SKIP):
+        return None
+
+    # API format: openai-compatible or anthropic
+    theme.clear_screen()
+    theme.banner("Add a custom model")
+    print(f"  Preset: {theme.color(name, 'accent')}  ({model_id})")
+    print(f"  URL:    {base_url}\n")
+    print("  API format:\n")
+    print(f"    {theme.color('1', 'highlight')}) openai   — OpenAI-compatible (most providers)")
+    print(f"    {theme.color('2', 'highlight')}) anthropic — Anthropic's native API")
+    try:
+        fmt_choice = input(theme.color("\n  Choice [1]: ", "highlight")).strip() or "1"
+    except (EOFError, KeyboardInterrupt):
+        return None
+    api_format = "anthropic" if fmt_choice == "2" else "openai"
+
+    env_var = _prompt_nav("Environment variable for API key",
+                          default=f"{name.upper().replace('-', '_')}_API_KEY",
+                          required=True)
+    if env_var in (_BACK, _QUIT, _SKIP):
+        return None
+
+    provider = _prompt_nav("Provider label (for display)",
+                           default=label, required=True)
+    if provider in (_BACK, _QUIT, _SKIP):
+        return None
+
+    # Save
+    existing[name] = {
+        "label": label,
+        "model": model_id,
+        "base_url": base_url,
+        "api_format": api_format,
+        "api_key_env": env_var,
+        "provider": provider,
+        "extra": {},
+    }
+    try:
+        save_custom_presets(existing)
+        theme.success(f"Custom model '{name}' saved.")
+        if not os.environ.get(env_var):
+            theme.warn(f"Remember: {env_var} is not set in your environment.")
+            theme.muted("  The next step will offer to save it.")
+        try:
+            input(theme.color("  Press Enter to continue...", "muted"))
+        except (EOFError, KeyboardInterrupt):
+            pass
+        return name
+    except Exception as e:
+        theme.error(f"Failed to save custom preset: {e}")
+        try:
+            input("  Press Enter to continue...")
+        except (EOFError, KeyboardInterrupt):
+            pass
+        return None
+
+
 def _step_api_key(state: dict):
-    """Step 4: prompt for API key if needed. Skippable.
+    """Step 4: verify the chosen model's API key is available.
 
-    Does NOT write to disk — stores the pending key in state. Actual write
-    happens in _finalize_quick_start once the user confirms. This way backing
-    out and changing work_dir doesn't leave orphan .env files behind.
-
-    Records one of: "no_key_needed", "already_set", "saved", "skipped".
+    Providers collect keys in the overview step, but a user may pick a model
+    whose provider wasn't configured. This step is interactive: if the key is
+    missing, the user can enter it here, go back to re-configure the provider,
+    or skip and add later.
     """
     from model_wizard import load_presets
     presets = state.get("_available_presets") or load_presets()
     preset_key = state.get("model_preset")
     preset = presets.get(preset_key, {})
     key_env = preset.get("api_key_env")
+    label = preset.get("label", preset_key)
 
-    # Normalize: treat empty string env var name same as None
+    theme.clear_screen()
+    theme.step_header(4, 5, "Verify model access")
+
+    # Local model — no key needed
     if not key_env:
-        theme.success(f"No API key needed for {preset.get('label', preset_key)} (local model).")
+        theme.success(f"  {label} is a local model — no API key needed.")
         state["api_key_status"] = "no_key_needed"
         state["api_key_pending"] = None
         try:
-            input(theme.color("  Press Enter to continue...", "muted"))
+            input(theme.color("\n  Press Enter to continue...", "muted"))
         except (EOFError, KeyboardInterrupt):
             return _QUIT
-        return "no_key_needed"
+        return state["api_key_status"]
 
+    # Key already in env (set during provider step OR pre-existing)
     if os.environ.get(key_env):
-        theme.success(f"{key_env} is already set in your environment.")
-        state["api_key_status"] = "already_set"
-        state["api_key_pending"] = None
+        if state.get("api_keys_pending", {}).get(key_env):
+            theme.success(f"  {key_env} staged — will be saved to your work dir on finalize.")
+            state["api_key_status"] = "pending_save"
+            state["api_key_pending"] = {
+                "env_var": key_env,
+                "value": state["api_keys_pending"][key_env],
+            }
+        else:
+            theme.success(f"  {key_env} is already set in your environment.")
+            state["api_key_status"] = "already_set"
+            state["api_key_pending"] = None
         try:
-            input(theme.color("  Press Enter to continue...", "muted"))
+            input(theme.color("\n  Press Enter to continue...", "muted"))
         except (EOFError, KeyboardInterrupt):
             return _QUIT
-        return "already_set"
+        return state["api_key_status"]
 
-    print(f"  {theme.color(preset.get('label', preset_key), 'accent', bold=True)} needs an API key.")
-    print(f"  Environment variable: {theme.color(key_env, 'highlight')}")
-    print(f"  You can skip and add it later via the Models tab or .env file.\n")
-    print(_nav_hint(skippable=True))
+    # Key is missing — interactive recovery. Let the user enter it here,
+    # go back to provider config, or skip with explicit warning.
+    theme.warn(f"  {label} needs {theme.color(key_env, 'highlight')} — but it's not set.")
+    print()
+    print(f"  {theme.color('e', 'highlight')}) Enter the API key now")
+    print(f"  {theme.color('b', 'highlight')}) Back to provider setup")
+    print(f"  {theme.color('s', 'highlight')}) Skip (add later via Models tab)")
+    print(f"  {theme.color('q', 'highlight')}) Quit")
 
-    result = _prompt_nav("API key", hint=f"paste value for {key_env}", skippable=True)
-    if result in (_BACK, _QUIT):
-        return result
-    if result is _SKIP:
-        theme.muted(f"Skipped — remember to set {key_env} before launching.")
-        state["api_key_status"] = "skipped"
-        state["api_key_pending"] = None
-        return _SKIP
-    # Stage the key for writing during finalize (do NOT touch work_dir yet —
-    # user may go back and change it)
-    state["api_key_status"] = "pending_save"
-    state["api_key_pending"] = {"env_var": key_env, "value": result}
-    theme.success(f"{key_env} will be saved to your work dir on confirm.")
-    return result
+    while True:
+        try:
+            choice = input(theme.color("\n  Choice [e]: ", "highlight")).strip().lower() or "e"
+        except (EOFError, KeyboardInterrupt):
+            return _QUIT
+        if choice == "q":
+            return _QUIT
+        if choice == "b":
+            return _BACK
+        if choice == "s":
+            theme.muted(f"  Skipped — remember to set {key_env} before running tasks.")
+            state["api_key_status"] = "skipped"
+            state["api_key_pending"] = None
+            try:
+                input(theme.color("  Press Enter to continue...", "muted"))
+            except (EOFError, KeyboardInterrupt):
+                return _QUIT
+            return state["api_key_status"]
+        if choice == "e":
+            try:
+                key_val = input(theme.color(
+                    f"  Paste {key_env} value: ", "highlight")).strip()
+            except (EOFError, KeyboardInterrupt):
+                return _QUIT
+            if not key_val:
+                theme.warn("  Empty input — no key saved. Try again or choose another option.")
+                continue
+            # Stage for finalize + apply to current process
+            os.environ[key_env] = key_val
+            state.setdefault("api_keys_pending", {})[key_env] = key_val
+            state["api_key_status"] = "pending_save"
+            state["api_key_pending"] = {"env_var": key_env, "value": key_val}
+            theme.success(f"  {key_env} staged — will be saved on finalize.")
+            try:
+                input(theme.color("  Press Enter to continue...", "muted"))
+            except (EOFError, KeyboardInterrupt):
+                return _QUIT
+            return state["api_key_status"]
+        theme.error(f"  Unknown choice: {choice}")
 
 
 def _save_env_key(work_dir: str, env_var: str, key: str):
@@ -600,11 +1489,17 @@ def _finalize_quick_start(state: dict):
         os.makedirs(os.path.join(work_dir, sub), exist_ok=True)
 
     # Write API key to work dir .env only now that user has confirmed
-    pending = state.get("api_key_pending")
-    if pending:
-        _save_env_key(work_dir, pending["env_var"], pending["value"])
-        os.environ[pending["env_var"]] = pending["value"]  # apply to current session
-        theme.success(f"{pending['env_var']} saved to {os.path.join(work_dir, '.env')}")
+    # Write all API keys staged during the provider overview step.
+    # New: state["api_keys_pending"] is a dict of env_var -> value (multi-provider).
+    # Backwards compat: state["api_key_pending"] was a single {env_var, value} dict.
+    all_pending = dict(state.get("api_keys_pending") or {})
+    single = state.get("api_key_pending")
+    if single:
+        all_pending[single["env_var"]] = single["value"]
+    for env_var, key_val in all_pending.items():
+        _save_env_key(work_dir, env_var, key_val)
+        os.environ[env_var] = key_val
+        theme.success(f"{env_var} saved to {os.path.join(work_dir, '.env')}")
 
     agent = {
         "id": state["template"],
@@ -646,6 +1541,7 @@ def _finalize_quick_start(state: dict):
     print(f"  Agent:   {theme.color(tmpl['name'], 'accent')} on {theme.color(state['model_preset'], 'accent')}")
     print(f"  Work dir: {work_dir}\n")
 
+    prefetch_embedding_models()
     _launch_starling_or_exit(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -751,6 +1647,92 @@ def _step_agent_count(state: dict):
         theme.error(f"Pick between 2 and {MAX_AGENTS}.")
 
 
+def _custom_agent_flow(used_ids: set, agent_index: int):
+    """Prompt user to build a custom agent from scratch.
+
+    Quit is suppressed — user can only complete or back out to template pick.
+    Returns a partial agent dict (id, name, role, goal, backstory, tools) or
+    _BACK / None (None = validation loop gave up, restart template pick).
+    Model/preset is picked separately by the caller.
+    """
+    global _QUIT_SUPPRESSED
+    prev_suppressed = _QUIT_SUPPRESSED
+    _QUIT_SUPPRESSED = True
+    try:
+        return _custom_agent_flow_body(used_ids, agent_index)
+    finally:
+        _QUIT_SUPPRESSED = prev_suppressed
+
+
+def _custom_agent_flow_body(used_ids: set, agent_index: int):
+    theme.clear_screen()
+    theme.step_header(3, 5, f"Custom agent {agent_index + 1}")
+    print("  Build a custom agent. Provide a short id, name, role, and goal.")
+    print("  Backstory is optional. Tools can be added later in the TUI.\n")
+    print(_nav_hint())
+
+    def _ask(label: str, default: str = "", required: bool = True, block_manager: bool = True):
+        while True:
+            try:
+                raw = input(theme.prompt_text(label, default=default)).strip()
+            except (EOFError, KeyboardInterrupt):
+                return _QUIT
+            low = raw.lower()
+            if low == "b":
+                return _BACK
+            if low == "q":
+                if _QUIT_SUPPRESSED:
+                    theme.warn("  Quit is disabled here — use 'b' to go back.")
+                    continue
+                return _QUIT
+            val = raw or default
+            if required and not val:
+                theme.error(f"{label} is required.")
+                continue
+            if block_manager and _contains_manager(val):
+                _print_manager_block(label)
+                continue
+            return val
+
+    # id
+    while True:
+        aid = _ask("Agent id (snake_case, e.g. 'researcher')", required=True)
+        if aid in (_BACK, _QUIT):
+            return aid
+        if aid in used_ids:
+            theme.error(f"'{aid}' is already taken by another agent — pick a different id.")
+            continue
+        if not all(c.isalnum() or c == "_" for c in aid):
+            theme.error("Id must contain only letters, digits, and underscores.")
+            continue
+        break
+
+    name = _ask("Display name", default=aid.replace("_", " ").title())
+    if name in (_BACK, _QUIT):
+        return name
+    role = _ask("Role (short title, e.g. 'Senior Researcher')")
+    if role in (_BACK, _QUIT):
+        return role
+    goal = _ask("Goal (one sentence — what this agent delivers)")
+    if goal in (_BACK, _QUIT):
+        return goal
+    backstory = _ask("Backstory (optional — 1-2 sentences)", required=False)
+    if backstory in (_BACK, _QUIT):
+        return backstory
+    if not backstory:
+        backstory = f"{name}, a custom agent on the team."
+
+    return {
+        "id": aid,
+        "name": name,
+        "role": role,
+        "goal": goal,
+        "backstory": backstory,
+        "tools": [],
+        "tier": "specialist",
+    }
+
+
 def _step_agents_loop(state: dict):
     """Build each agent with abbreviated prompts. Supports back within the loop."""
     try:
@@ -770,11 +1752,18 @@ def _step_agents_loop(state: dict):
 
     from model_wizard import load_presets
     all_presets = load_presets()
-    available = [(k, v) for k, v in all_presets.items() if _preset_available(k, v)]
-    if not available:
-        theme.warn("No model presets have valid API keys or reachable local servers.")
-        print("  Set API keys in your environment, or start LM Studio/Ollama, then re-run setup.")
-        available = list(all_presets.items())
+    if not all_presets:
+        theme.error("No model presets registered. Please report this as a bug.")
+        return _QUIT
+    # Show all presets — API key prompts handled separately during finalize.
+    # Sort so available/ready ones appear first.
+    def _sort_key(item):
+        k, v = item
+        key_env = v.get("api_key_env")
+        if key_env:
+            return (0 if os.environ.get(key_env) else 2, k)
+        return (0 if _preset_available(k, v) else 3, k)
+    available = sorted(all_presets.items(), key=_sort_key)
     state["_available_presets"] = dict(available)
 
     count = state["agent_count"]
@@ -789,15 +1778,31 @@ def _step_agents_loop(state: dict):
         theme.clear_screen()
         theme.step_header(3, 5, f"Agent {i + 1} of {count}")
 
-        # Pick template
+        # Pick template — also offer "+ Build custom agent" escape hatch.
+        # Templates are shown with tier badge so user knows what they're picking.
         tmpl_options = []
         for tid, tname in templates:
             tmpl = AGENT_TEMPLATES[tid]
-            purpose = tmpl.get("primary_purpose", "")[:55]
-            display = f"{theme.color(tname, 'accent', bold=True):30s} — {theme.color(purpose, 'muted')}"
+            purpose = tmpl.get("primary_purpose", "")[:50]
+            tier = tmpl.get("tier", "specialist")
+            tier_color = ("highlight" if tier == "leader"
+                          else "accent" if tier == "coordinator"
+                          else "muted")
+            tier_badge = f"[{theme.color(tier, tier_color)}]"
+            display = (
+                f"{theme.color(tname, 'accent', bold=True):30s} "
+                f"{tier_badge:30s} "
+                f"{theme.color(purpose, 'muted')}"
+            )
             tmpl_options.append((display, tid))
+        # Custom agent option at end
+        tmpl_options.append((
+            theme.color("+ Build custom agent (name, role, goal from scratch)",
+                        "highlight", bold=True),
+            "_custom_agent",
+        ))
 
-        print(f"  Pick a template for agent {i + 1}.\n")
+        print(f"  Pick a template for agent {i + 1}, or build a custom one.\n")
         print(_nav_hint())
         tmpl_result = _pick_option("Template", tmpl_options, default_index=0)
         if tmpl_result is _BACK:
@@ -811,59 +1816,89 @@ def _step_agents_loop(state: dict):
             continue
         if tmpl_result in (_SKIP, _QUIT):
             return tmpl_result
-        template_id = tmpl_result
-        tmpl = AGENT_TEMPLATES[template_id]
 
-        # Pick model
+        # Custom agent path — prompt for name/role/goal, no template
+        if tmpl_result == "_custom_agent":
+            custom = _custom_agent_flow(used_ids, i)
+            if custom in (_BACK, _QUIT):
+                if custom is _QUIT:
+                    return _QUIT
+                continue  # back to template pick
+            if custom is None:
+                continue
+            # custom is a partial agent dict (no preset yet). We'll add model
+            # below via the normal picker flow. Skip template fetch.
+            template_id = None
+            tmpl = None
+            pending_custom_agent = custom
+        else:
+            template_id = tmpl_result
+            tmpl = AGENT_TEMPLATES[template_id]
+            pending_custom_agent = None
+
+        # Pick model — use the unified provider-based picker.
+        # Providers were configured once at the top of team setup (auto-detected
+        # from env vars). Subsequent agent picks only show the model list.
         theme.clear_screen()
         theme.step_header(3, 5, f"Agent {i + 1} of {count} — model")
-        model_options = []
-        for k, v in available:
-            key_env = v.get("api_key_env")
-            key_status = ""
-            if key_env and os.environ.get(key_env):
-                key_status = theme.color(" [key set]", "success")
-            elif not key_env:
-                key_status = theme.color(" [local]", "accent")
-            display = f"{k:18s} {v.get('label', ''):30s}{key_status}"
-            model_options.append((display, k))
-
-        print(f"  Pick a model for {theme.color(tmpl['name'], 'accent')}.\n")
-        print(_nav_hint())
-        model_result = _pick_option("Model", model_options, default_index=0)
+        # Pass a temporary state so we don't collide with the main wizard state.
+        # Inherit configured_providers so we don't re-prompt provider config.
+        picker_state = {
+            "configured_providers": state.get("configured_providers", set()),
+            "api_keys_pending": state.get("api_keys_pending", {}),
+        }
+        model_result = _step_model(picker_state)
+        # Propagate any API keys the user added during this pick
+        for k, v in picker_state.get("api_keys_pending", {}).items():
+            state.setdefault("api_keys_pending", {})[k] = v
+        state["configured_providers"] = picker_state.get("configured_providers", set())
         if model_result is _BACK:
             # Re-pick template for this agent
             continue
         if model_result in (_SKIP, _QUIT):
             return model_result
 
-        # Build the agent, ensuring unique ID — use a counter that advances
-        # until an unused ID is found (safe against collisions even if a user
-        # already picked an ID like "researcher_2" earlier in the loop)
-        base_id = template_id
-        if base_id not in used_ids:
-            agent_id = base_id
-            suffix_n = 0
+        # Build the agent. For custom agents, user-picked id is authoritative.
+        # For template agents, ensure unique ID via numeric suffix.
+        if pending_custom_agent is not None:
+            agent = {
+                "id": pending_custom_agent["id"],
+                "name": pending_custom_agent["name"],
+                "role": pending_custom_agent["role"],
+                "goal": pending_custom_agent["goal"],
+                "backstory": pending_custom_agent["backstory"],
+                "tools": list(pending_custom_agent.get("tools", [])),
+                "preset": model_result,
+                "color": COLORS[i % len(COLORS)],
+                "allow_delegation": False,
+                "template": "custom",
+                "tier": pending_custom_agent.get("tier", "specialist"),
+            }
         else:
-            suffix_n = 2
-            while f"{base_id}_{suffix_n}" in used_ids:
-                suffix_n += 1
-            agent_id = f"{base_id}_{suffix_n}"
-        agent = {
-            "id": agent_id,
-            "name": tmpl["name"] if suffix_n == 0 else f"{tmpl['name']} {suffix_n}",
-            "role": tmpl["role"],
-            "goal": tmpl["goal"],
-            "backstory": tmpl["backstory"],
-            "tools": list(tmpl["tools"]),
-            "preset": model_result,
-            "color": COLORS[i % len(COLORS)],
-            "allow_delegation": False,
-            "template": template_id,
-            "tier": tmpl.get("tier", "specialist"),
-        }
+            base_id = template_id
+            if base_id not in used_ids:
+                agent_id = base_id
+                suffix_n = 0
+            else:
+                suffix_n = 2
+                while f"{base_id}_{suffix_n}" in used_ids:
+                    suffix_n += 1
+                agent_id = f"{base_id}_{suffix_n}"
+            agent = {
+                "id": agent_id,
+                "name": tmpl["name"] if suffix_n == 0 else f"{tmpl['name']} {suffix_n}",
+                "role": tmpl["role"],
+                "goal": tmpl["goal"],
+                "backstory": tmpl["backstory"],
+                "tools": list(tmpl["tools"]),
+                "preset": model_result,
+                "color": COLORS[i % len(COLORS)],
+                "allow_delegation": False,
+                "template": template_id,
+                "tier": tmpl.get("tier", "specialist"),
+            }
         agents.append(agent)
-        used_ids.add(agent_id)
+        used_ids.add(agent["id"])
         i += 1
 
     return "agents_complete"
@@ -1003,6 +2038,39 @@ def _finalize_team_setup(state: dict):
     with open(config_path, "w") as f:
         json.dump(config, f, indent=2)
 
+    # Persist any API keys staged during provider overview to work_dir/.env
+    pending = state.get("api_keys_pending") or {}
+    if pending:
+        env_path = os.path.join(work_dir, ".env")
+        try:
+            existing_env = {}
+            if os.path.exists(env_path):
+                with open(env_path) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        k, _, v = line.partition("=")
+                        existing_env[k.strip()] = v.strip().strip('"').strip("'")
+            # Sanitize before writing — staged keys originate from user input
+            # in the wizard, but we belt-and-suspenders the write path so future
+            # callers can't accidentally inject env vars via newlines in values.
+            sanitized_pending = {}
+            for k, v in pending.items():
+                ck, cv = _sanitize_env_pair(k, v)
+                if ck is not None:
+                    sanitized_pending[ck] = cv
+            existing_env.update(sanitized_pending)
+            with open(env_path, "w") as f:
+                for k, v in existing_env.items():
+                    f.write(f"{k}={v}\n")
+            try:
+                os.chmod(env_path, 0o600)
+            except OSError:
+                theme.warn(f"  Could not restrict {env_path} to 600 — contents may be world-readable.")
+        except OSError as e:
+            theme.warn(f"  Could not write .env: {e}")
+
     theme.clear_screen()
     theme.banner("Setup Complete!")
     theme.success(f"Config saved: {config_path}")
@@ -1011,7 +2079,216 @@ def _finalize_team_setup(state: dict):
           f"{theme.color(next(a['name'] for a in agents if a['id'] == leader_id), 'accent', bold=True)}")
     print(f"  Work dir: {work_dir}\n")
 
+    prefetch_embedding_models()
     _launch_starling_or_exit(os.path.dirname(os.path.abspath(__file__)))
+
+
+def prefetch_embedding_models():
+    """Pre-download the two embedding models used by routing and memory.
+
+    Called at the end of every setup path so fastembed doesn't block the user
+    on first task. CPU-only — never GPU.
+    """
+    theme.info("  Pre-downloading embedding models (one-time, ~160 MB)...")
+    theme.muted("  Cached in ~/.cache/starling/embeddings/ — persists across reboots.")
+    theme.muted("  • Routing: all-MiniLM-L6-v2 (~23 MB)")
+    theme.muted("  • Memory:  nomic-embed-text-v1.5 (~138 MB)")
+    try:
+        from fastembed import TextEmbedding
+        from fastembed.common.types import Device
+        import semantic_router as _sr
+        import crew_memory as _cm
+        cache_dir = os.path.expanduser("~/.cache/starling/embeddings")
+        os.makedirs(cache_dir, exist_ok=True)
+        print("  Downloading routing model...", end=" ", flush=True)
+        TextEmbedding(_sr._ROUTING_MODEL, cuda=Device.CPU, cache_dir=cache_dir)
+        theme.success("done")
+        print("  Downloading memory model...", end=" ", flush=True)
+        TextEmbedding(_cm._EMBED_MODEL, cuda=Device.CPU, cache_dir=cache_dir)
+        theme.success("done")
+        print()
+    except Exception as e:
+        theme.warn(f"  Could not pre-download models: {e}")
+        theme.muted("  They'll be downloaded automatically on first task.")
+
+
+# === Export (.starling backup files) ===
+
+def export_backup(out_path: str = "", with_secrets: bool = True) -> Optional[str]:
+    """Export current project_config.json as a .starling backup.
+
+    By default, secrets ARE included so restore is zero-setup (private backup).
+    Pass with_secrets=False to strip API keys and Telegram tokens for sharing.
+    """
+    import datetime as _dt
+    from config_loader import load_project_config, config_exists
+    from model_wizard import load_presets, BUILTIN_PRESETS
+
+    if not config_exists():
+        theme.error("No project_config.json to export. Run 'starling setup' first.")
+        return None
+
+    config = load_project_config()
+    project = config.get("project", {}) or {}
+
+    all_presets = load_presets()
+    # Include ALL non-default presets: custom keys AND builtin overrides that
+    # differ from the shipped defaults. This is what model_presets.json already
+    # stores (see save_custom_presets), so read it directly for full fidelity.
+    from model_wizard import PRESETS_FILE
+    custom_presets = {}
+    if os.path.exists(PRESETS_FILE):
+        try:
+            with open(PRESETS_FILE) as f:
+                custom_presets = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            custom_presets = {}
+
+    _now = _dt.datetime.now()
+    backup = {
+        "backup_name": f"Starling export — {project.get('name') or 'project'} — "
+                       f"{_now.strftime('%Y-%m-%d %H:%M')}",
+        "starling_version": _starling_version(),
+        "backup_format_version": 1,
+        "exported_at": _now.isoformat(timespec="seconds"),
+        "exported_at_human": _now.strftime("%Y-%m-%d %H:%M:%S"),
+        "has_secrets": bool(with_secrets),
+        "project": {
+            "name": project.get("name", ""),
+            "description": project.get("description", ""),
+        },
+        "agents": config.get("agents", []),
+        "default_tasks": config.get("default_tasks", []),
+        "routing": config.get("routing", {"keywords": {}, "default_agent": ""}),
+        "model_presets": custom_presets,
+        "skills": config.get("skills", []),
+    }
+
+    # Include cron jobs from work dir (config, not runtime data)
+    work_dir_abs = os.path.expanduser(project.get("work_dir") or "")
+    if work_dir_abs:
+        cron_path = os.path.join(work_dir_abs, "cron_config.json")
+        if os.path.exists(cron_path):
+            try:
+                with open(cron_path) as f:
+                    backup["cron_jobs"] = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        # Include custom skill code files (work_dir/skills/*.py)
+        skills_dir = os.path.join(work_dir_abs, "skills")
+        if os.path.isdir(skills_dir):
+            skills_bundle = {}
+            for fname in os.listdir(skills_dir):
+                if not fname.endswith(".py"):
+                    continue
+                fpath = os.path.join(skills_dir, fname)
+                try:
+                    with open(fpath) as f:
+                        skills_bundle[fname] = f.read()
+                except OSError:
+                    pass
+            if skills_bundle:
+                backup["skill_files"] = skills_bundle
+
+    if with_secrets:
+        # Export EVERY key=value in work_dir/.env (tool keys, not just model keys).
+        # Plus any preset-referenced env vars present in os.environ as a fallback.
+        api_keys = {}
+        work_dir = project.get("work_dir") or ""
+        env_file = os.path.join(os.path.expanduser(work_dir), ".env") if work_dir else ""
+        if env_file and os.path.exists(env_file):
+            try:
+                with open(env_file) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        k, _, val = line.partition("=")
+                        k = k.strip()
+                        val = val.strip().strip('"').strip("'")
+                        if k and val:
+                            api_keys[k] = val
+            except OSError:
+                pass
+
+        # Also pick up preset-referenced keys from the current process env if
+        # they're missing from .env (useful when keys were exported in ~/.bashrc).
+        referenced_env_vars = {
+            v.get("api_key_env") for v in all_presets.values() if v.get("api_key_env")
+        }
+        for k in referenced_env_vars:
+            if k and k not in api_keys and os.environ.get(k):
+                api_keys[k] = os.environ[k]
+        backup["api_keys"] = api_keys
+
+        # Telegram tokens (from work dir telegram_config.json if present)
+        tg_path = os.path.join(os.path.expanduser(work_dir), "telegram_config.json") if work_dir else ""
+        if tg_path and os.path.exists(tg_path):
+            try:
+                with open(tg_path) as f:
+                    tg = json.load(f)
+                if tg.get("bot_token"):
+                    backup["bot_token"] = tg["bot_token"]
+                if tg.get("chat_id"):
+                    backup["chat_id"] = tg["chat_id"]
+            except (OSError, json.JSONDecodeError):
+                pass
+
+    if not out_path:
+        from preferences import get_backup_dir, set_backup_dir, DEFAULT_BACKUP_DIR
+        current_dir = get_backup_dir()
+
+        # Mini menu: one question, blank = keep current default.
+        try:
+            print()
+            print(theme.color(
+                f"  Backup directory [{current_dir}]:", "highlight"
+            ))
+            answer = input("  > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+
+        if answer:
+            chosen_dir = os.path.expanduser(answer)
+            if chosen_dir != current_dir:
+                set_backup_dir(chosen_dir)
+                theme.muted(f"  Saved as default: {chosen_dir}")
+            current_dir = chosen_dir
+
+        name = project.get("name") or "project"
+        ts = _now.strftime("%Y-%m-%d %H-%M")
+        suffix = "" if with_secrets else " (share-safe)"
+        out_path = os.path.join(
+            current_dir, f"Starling export {name} {ts}{suffix}.starling"
+        )
+
+    out_path = os.path.expanduser(out_path)
+    try:
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        with open(out_path, "w") as f:
+            json.dump(backup, f, indent=2)
+        chmod_ok = True
+        if with_secrets:
+            try:
+                os.chmod(out_path, 0o600)
+            except OSError:
+                chmod_ok = False
+    except OSError as e:
+        theme.error(f"Cannot write backup: {e}")
+        return None
+
+    theme.success(f"Exported to {out_path}")
+    if with_secrets:
+        theme.warn("  ⚠ This backup contains API keys and bot tokens — do NOT share.")
+        if chmod_ok:
+            theme.muted("  File permissions set to 600 (owner read/write only).")
+        else:
+            theme.warn("  Could not set permissions to 600 (filesystem may not support it).")
+            theme.warn("  Store this file somewhere secure — it may be world-readable.")
+    else:
+        theme.muted("  Secrets stripped. Safe to share.")
+    return out_path
 
 
 # === Import flow (.starling backup files) ===
@@ -1022,59 +2299,191 @@ def _run_import_flow() -> bool:
     theme.banner("Import existing config")
     print("  Import a .starling backup file to restore a previous setup.")
     print("  The file contains agent configs, model presets, routing, and skill references.")
-    print("  (Secrets like API keys and Telegram tokens are NOT included and must be re-added.)\n")
+    print("  (If the backup includes secrets, they'll be restored automatically.)\n")
     print(_nav_hint())
 
-    # Suggest a default location
-    default_dir = os.path.expanduser("~/starling-backups")
-    suggested = ""
-    if os.path.isdir(default_dir):
-        candidates = sorted(
-            [f for f in os.listdir(default_dir) if f.endswith(".starling")],
+    # Show all backups in the configured directory, let user pick by number.
+    from preferences import get_backup_dir
+    default_dir = get_backup_dir()
+
+    def _list_backups():
+        if not os.path.isdir(default_dir):
+            return []
+        files = [f for f in os.listdir(default_dir) if f.endswith(".starling")]
+        # Sort newest-first by mtime
+        return sorted(
+            files,
+            key=lambda f: os.path.getmtime(os.path.join(default_dir, f)),
             reverse=True,
         )
-        if candidates:
-            suggested = os.path.join(default_dir, candidates[0])
 
-    while True:
-        path_result = _prompt_nav(
-            "Path to .starling file",
-            default=suggested,
-            hint="drag-and-drop or paste a path",
-            required=True,
-        )
-        if path_result in (_BACK, _QUIT):
-            return False
-        path = os.path.expanduser(path_result)
-        if not os.path.exists(path):
-            theme.error(f"File not found: {path}")
+    import datetime as _dt
+    path = None
+    backup = None
+
+    while path is None:
+        theme.clear_screen()
+        theme.banner("Import existing config")
+        print(f"  Backup directory: {theme.color(default_dir, 'muted')}\n")
+
+        files = _list_backups()
+        if not files:
+            theme.warn("  No .starling backups found in that directory.")
+            print(f"  {theme.color('p', 'highlight')}) Enter a custom path")
+            print(f"  {theme.color('b', 'highlight')}) Back")
+            print(f"  {theme.color('q', 'highlight')}) Quit\n")
+            try:
+                choice = input(theme.color("  Choice: ", "highlight")).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return False
+            if choice == "b":
+                return False
+            if choice == "q":
+                return False
+            if choice == "p":
+                manual = _prompt_nav("Path to .starling file", required=True)
+                if manual in (_BACK, _QUIT):
+                    return False
+                candidate = os.path.expanduser(manual)
+                if not os.path.exists(candidate):
+                    theme.error(f"File not found: {candidate}")
+                    input(theme.color("  Press Enter to continue...", "muted"))
+                    continue
+                path = candidate
+                break
             continue
 
-        # Parse + validate
+        print("  Available backups:\n")
+        for i, fname in enumerate(files, 1):
+            fpath = os.path.join(default_dir, fname)
+            mtime = _dt.datetime.fromtimestamp(os.path.getmtime(fpath))
+            size_kb = os.path.getsize(fpath) / 1024
+            # Peek at has_secrets without full validation
+            try:
+                with open(fpath) as f:
+                    peek = json.load(f)
+                has_secrets = peek.get("has_secrets", False)
+            except Exception:
+                has_secrets = False
+            secret_tag = theme.color(" [with secrets]", "success") if has_secrets else theme.color(" [stripped]", "muted")
+            print(f"    {theme.color(f'{i:>2}', 'highlight')}) "
+                  f"{fname}  "
+                  f"{theme.color(mtime.strftime('%Y-%m-%d %H:%M'), 'muted')}  "
+                  f"{theme.color(f'{size_kb:.0f} KB', 'muted')}{secret_tag}")
+
+        print()
+        print(f"  {theme.color('<num>', 'highlight')}       Import that backup")
+        print(f"  {theme.color('d <num>', 'error')}     Delete that backup")
+        print(f"  {theme.color('p', 'highlight')}           Enter a custom path")
+        print(f"  {theme.color('b', 'highlight')}           Back")
+        print(f"  {theme.color('q', 'highlight')}           Quit\n")
+
+        try:
+            choice = input(theme.color("  Choice: ", "highlight")).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return False
+        if choice == "b":
+            return False
+        if choice == "q":
+            return False
+        if choice == "p":
+            manual = _prompt_nav("Path to .starling file", required=True)
+            if manual in (_BACK, _QUIT):
+                continue
+            candidate = os.path.expanduser(manual)
+            if not os.path.exists(candidate):
+                theme.error(f"File not found: {candidate}")
+                input(theme.color("  Press Enter to continue...", "muted"))
+                continue
+            path = candidate
+            break
+
+        # Delete action: "d 3"
+        if choice.startswith("d "):
+            try:
+                del_idx = int(choice[2:].strip()) - 1
+            except ValueError:
+                theme.error("  Usage: d <number>")
+                input(theme.color("  Press Enter to continue...", "muted"))
+                continue
+            if not (0 <= del_idx < len(files)):
+                theme.error("  Number out of range.")
+                input(theme.color("  Press Enter to continue...", "muted"))
+                continue
+            target = files[del_idx]
+            theme.warn(f"\n  Delete '{target}' permanently?")
+            try:
+                confirm = input(theme.color("  Type 'delete' to confirm: ", "error")).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                continue
+            if confirm != "delete":
+                theme.muted("  Cancelled.")
+                input(theme.color("  Press Enter to continue...", "muted"))
+                continue
+            try:
+                os.remove(os.path.join(default_dir, target))
+                theme.success(f"  Deleted {target}")
+            except OSError as e:
+                theme.error(f"  Could not delete: {e}")
+            input(theme.color("  Press Enter to continue...", "muted"))
+            continue
+
+        # Numeric selection → import
+        try:
+            idx = int(choice) - 1
+        except ValueError:
+            theme.error("  Enter a number, 'd <num>' to delete, 'p' for custom path, 'b' back, or 'q' quit.")
+            input(theme.color("  Press Enter to continue...", "muted"))
+            continue
+        if not (0 <= idx < len(files)):
+            theme.error("  Number out of range.")
+            input(theme.color("  Press Enter to continue...", "muted"))
+            continue
+        candidate = os.path.join(default_dir, files[idx])
+        # Validate before committing — invalid picks loop back to the list
+        # without recursing (keeps the call stack flat).
+        backup, errors = _load_and_validate_backup(candidate)
+        if errors:
+            theme.error("This backup has problems:")
+            for err in errors:
+                print(f"    • {err}")
+            input(theme.color("  Press Enter to return to the list...", "muted"))
+            continue
+        path = candidate
+        break
+
+    # `path` holds the validated backup's location; `backup` is already loaded.
+    # (For the custom-path branch above, we also validate before breaking.)
+    if path and backup is None:
         backup, errors = _load_and_validate_backup(path)
         if errors:
             theme.error("This backup has problems:")
             for err in errors:
                 print(f"    • {err}")
-            retry = _prompt_nav("Try a different file?", default="y")
-            if retry in (_BACK, _QUIT):
-                return False
-            if isinstance(retry, str) and retry.lower().startswith("n"):
-                return False
-            continue
-        break
+            return False
 
     # Preview
     theme.clear_screen()
     theme.banner("Backup preview")
-    meta = backup.get("meta", {})
     project = backup.get("project", {})
     agents = backup.get("agents", [])
-    presets = backup.get("custom_presets", {}) or {}
-    skills = backup.get("skill_names", []) or []
+    # Support current export schema and the legacy keys in case an older
+    # backup is imported.
+    presets = backup.get("model_presets") or backup.get("custom_presets") or {}
+    skill_files = backup.get("skill_files") or {}
+    skill_refs = backup.get("skills") or backup.get("skill_names") or []
+    created = backup.get("exported_at_human") or backup.get("exported_at") \
+        or backup.get("meta", {}).get("created_at") or "unknown"
+    version = backup.get("starling_version") \
+        or backup.get("meta", {}).get("starling_version") or "unknown"
+    has_secrets_flag = backup.get("has_secrets", False)
 
-    print(f"  Created:  {theme.color(meta.get('created_at', 'unknown'), 'muted')}")
-    print(f"  From:     {theme.color(meta.get('starling_version', 'unknown'), 'muted')}\n")
+    print(f"  Created:  {theme.color(created, 'muted')}")
+    print(f"  From:     {theme.color(version, 'muted')}")
+    if has_secrets_flag:
+        print(f"  Secrets:  {theme.color('included', 'success')}\n")
+    else:
+        print(f"  Secrets:  {theme.color('stripped', 'muted')}\n")
     print(f"  Project:  {theme.color(project.get('name', '(unnamed)'), 'accent', bold=True)}")
     print(f"  Agents:   {len(agents)}")
     for a in agents:
@@ -1083,9 +2492,17 @@ def _run_import_flow() -> bool:
         print(f"    • {theme.color(a.get('name', a.get('id', '?')), 'accent', bold=True):25s} "
               f"({theme.color(tier, tier_color)}, {a.get('preset', '?')})")
     if presets:
-        print(f"  Custom model presets: {len(presets)}")
-    if skills:
-        print(f"  Skills referenced:    {len(skills)} (you must reinstall skill files separately)")
+        print(f"  Model presets:       {len(presets)} (custom + builtin overrides)")
+    if skill_files:
+        print(f"  Skill files bundled: {len(skill_files)} (restored to work_dir/skills)")
+    elif skill_refs:
+        print(f"  Skills referenced:   {len(skill_refs)} (reinstall skill files separately)")
+    if backup.get("cron_jobs"):
+        print(f"  Cron jobs:           restored")
+    if backup.get("api_keys"):
+        print(f"  API keys:            {len(backup['api_keys'])} restored to work_dir/.env")
+    if backup.get("bot_token"):
+        print(f"  Telegram:            bot_token + chat_id restored")
 
     # Choose to use as-is or open in wizard
     print()
@@ -1141,6 +2558,7 @@ def _run_import_flow() -> bool:
             for k in sorted(missing):
                 print(f"    • {k}")
 
+    prefetch_embedding_models()
     _launch_starling_or_exit(os.path.dirname(os.path.abspath(__file__)))
     return True
 
@@ -1152,6 +2570,17 @@ def _load_and_validate_backup(path: str):
         (backup_dict, errors_list). If errors_list is empty, the backup is safe to apply.
     """
     errors = []
+    # Reject absurdly large files before parsing — a 1 GB JSON of repeated
+    # characters is technically valid and would hang `json.load` for minutes
+    # while spiking memory. Real backups are well under 1 MB.
+    _MAX_BACKUP_BYTES = 10 * 1024 * 1024  # 10 MB
+    try:
+        size = os.path.getsize(path)
+    except OSError as e:
+        return None, [f"Cannot stat file: {e}"]
+    if size > _MAX_BACKUP_BYTES:
+        return None, [f"Backup file too large ({size:,} bytes; max {_MAX_BACKUP_BYTES:,})"]
+
     try:
         with open(path) as f:
             backup = json.load(f)
@@ -1218,13 +2647,8 @@ def _load_and_validate_backup(path: str):
     if len(agents) > MAX_AGENTS:
         errors.append(f"Too many agents: {len(agents)} (max {MAX_AGENTS})")
 
-    # Backup shouldn't contain secrets (sanity check — these would have been stripped by export)
-    for bad in ("bot_token", "chat_id", "api_keys"):
-        if bad in backup:
-            errors.append(
-                f"Backup contains '{bad}' — refusing to import for safety. "
-                f"Re-export with secrets stripped."
-            )
+    # Secrets (api_keys, bot_token, chat_id) are allowed when has_secrets=True.
+    # The importer will restore them into the work dir .env and telegram_config.json.
 
     return backup, errors
 
@@ -1233,15 +2657,27 @@ def _apply_backup(backup: dict, use_default_work_dir: bool = True) -> Optional[s
     """Apply a validated backup — write project_config.json and create work dir.
 
     Returns the resolved work_dir path, or None on failure.
+
+    Security: when use_default_work_dir=True (the only mode currently used by
+    the import wizard), we IGNORE any work_dir embedded in the backup and
+    always derive a fresh path from the project name. This prevents a malicious
+    backup from writing JSON/.env content to arbitrary filesystem locations
+    (e.g. ~/.ssh, /etc, ~/.bashrc) under the user's privileges.
     """
     project = backup.get("project", {})
-    work_dir = project.get("work_dir", "")
 
-    if use_default_work_dir and not work_dir:
+    if use_default_work_dir:
+        # Always derive — never trust backup-supplied work_dir.
         name_slug = (project.get("name") or "imported").lower().replace(" ", "-")
+        # Strip filesystem-hostile chars from the slug as a second line of defense.
+        name_slug = "".join(c for c in name_slug if c.isalnum() or c in "-_") or "imported"
         work_dir = os.path.expanduser(f"~/starling-projects/{name_slug}")
-    elif work_dir:
-        work_dir = os.path.expanduser(work_dir)
+    else:
+        # Caller explicitly requested honoring the embedded path. Only safe when
+        # the caller has already validated it (no current code path uses this).
+        work_dir = project.get("work_dir", "")
+        if work_dir:
+            work_dir = os.path.expanduser(work_dir)
 
     if not work_dir:
         theme.error("Could not determine work directory from backup.")
@@ -1268,16 +2704,170 @@ def _apply_backup(backup: dict, use_default_work_dir: bool = True) -> Optional[s
         "routing": backup.get("routing", {"keywords": {}, "default_agent": ""}),
     }
 
-    # Write custom model presets if any (merged with builtins via save_custom_presets)
-    custom_presets = backup.get("custom_presets") or {}
-    if custom_presets:
+    # Restore model presets (custom keys + any builtin overrides the backup carried).
+    # Merge with whatever is already on disk so we don't drop local edits that
+    # aren't represented in the backup. save_custom_presets re-diffs against
+    # BUILTIN_PRESETS, so only actual custom/override entries are persisted.
+    backup_presets = backup.get("model_presets") or backup.get("custom_presets") or {}
+    if backup_presets:
         try:
-            from model_wizard import load_presets, save_custom_presets
-            existing = load_presets()
-            existing.update(custom_presets)
-            save_custom_presets(existing)
+            from model_wizard import load_presets, save_custom_presets, PRESETS_FILE
+            # Read the raw overrides file (not merged with builtins) so we only
+            # write custom keys + existing overrides back — never every builtin.
+            on_disk = {}
+            if os.path.exists(PRESETS_FILE):
+                try:
+                    with open(PRESETS_FILE) as f:
+                        on_disk = json.load(f) or {}
+                except (OSError, json.JSONDecodeError):
+                    on_disk = {}
+            on_disk.update(backup_presets)
+            save_custom_presets(on_disk)
         except Exception as e:
             theme.warn(f"Could not import custom model presets: {e}")
+
+    # Restore API keys into work dir .env (from with-secrets backups)
+    api_keys = backup.get("api_keys") or {}
+    if api_keys:
+        env_path = os.path.join(work_dir, ".env")
+        try:
+            # Merge with existing .env, overwriting keys present in backup
+            existing_env = {}
+            if os.path.exists(env_path):
+                with open(env_path) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        k, _, v = line.partition("=")
+                        existing_env[k.strip()] = v.strip().strip('"').strip("'")
+            # Sanitize incoming api_keys before merging.
+            # Rejects malformed names + values containing CR/LF/NUL that would
+            # let a malicious backup inject extra env vars (e.g. LD_PRELOAD).
+            sanitized_keys = {}
+            rejected = []
+            for k, v in api_keys.items():
+                ck, cv = _sanitize_env_pair(k, v)
+                if ck is None:
+                    rejected.append(k)
+                    continue
+                sanitized_keys[ck] = cv
+            if rejected:
+                theme.warn(f"  Rejected {len(rejected)} unsafe env entries from backup: {', '.join(rejected[:5])}")
+            existing_env.update(sanitized_keys)
+            with open(env_path, "w") as f:
+                for k, v in existing_env.items():
+                    f.write(f"{k}={v}\n")
+            try:
+                os.chmod(env_path, 0o600)
+            except OSError:
+                theme.warn(f"  Could not restrict {env_path} to 600 — contents may be world-readable.")
+            # Also set in current process env so the wizard's launch sees them
+            for k, v in sanitized_keys.items():
+                os.environ[k] = v
+        except OSError as e:
+            theme.warn(f"Could not write .env: {e}")
+
+    # Restore cron jobs. Force every imported job to "pending_approval" so a
+    # malicious backup can't ship pre-activated cron entries that auto-fire
+    # against the user's LLM-connected crew on the next heartbeat tick.
+    cron_jobs = backup.get("cron_jobs")
+    if cron_jobs:
+        try:
+            quarantined = 0
+            normalized = []
+            # cron_jobs schema can be either a list of job dicts or a wrapper
+            # object containing a "jobs" list — handle both.
+            if isinstance(cron_jobs, dict):
+                jobs_list = cron_jobs.get("jobs", []) if isinstance(cron_jobs.get("jobs"), list) else []
+                wrapper = {k: v for k, v in cron_jobs.items() if k != "jobs"}
+            elif isinstance(cron_jobs, list):
+                jobs_list = cron_jobs
+                wrapper = None
+            else:
+                jobs_list = []
+                wrapper = None
+            for job in jobs_list:
+                if not isinstance(job, dict):
+                    continue
+                if job.get("status") == "active":
+                    job["status"] = "pending_approval"
+                    quarantined += 1
+                normalized.append(job)
+            payload = {**wrapper, "jobs": normalized} if wrapper is not None else normalized
+            with open(os.path.join(work_dir, "cron_config.json"), "w") as f:
+                json.dump(payload, f, indent=2)
+            if quarantined:
+                theme.warn(f"  {quarantined} restored cron job(s) set to 'pending_approval'. "
+                           f"Review and approve via TUI or Telegram before they run.")
+        except OSError as e:
+            theme.warn(f"Could not write cron_config.json: {e}")
+
+    # Restore custom skill files. Defense-in-depth against malicious backups:
+    # - basename equality blocks any path component (../ , subdirs)
+    # - explicit null-byte rejection (Python strings allow \x00; OS layer truncates)
+    # - leading dot rejected (no .bashrc-style hidden files)
+    # - extension lock to .py
+    # - realpath check confirms the resolved destination is inside skills_dir
+    skill_files = backup.get("skill_files") or {}
+    if skill_files:
+        skills_dir = os.path.join(work_dir, "skills")
+        try:
+            os.makedirs(skills_dir, exist_ok=True)
+            skills_dir_real = os.path.realpath(skills_dir)
+            rejected_files = []
+            for fname, content in skill_files.items():
+                if not isinstance(fname, str) or not isinstance(content, str):
+                    rejected_files.append(repr(fname))
+                    continue
+                if (
+                    "\x00" in fname
+                    or os.path.basename(fname) != fname
+                    or fname.startswith(".")
+                    or not fname.endswith(".py")
+                    or fname in ("", ".py")
+                ):
+                    rejected_files.append(fname)
+                    continue
+                dest = os.path.join(skills_dir, fname)
+                # Resolve and verify the final path stays under skills_dir.
+                # Catches symlink-based escapes if skills_dir itself contains a symlink.
+                if os.path.realpath(os.path.dirname(dest)) != skills_dir_real:
+                    rejected_files.append(fname)
+                    continue
+                with open(dest, "w") as f:
+                    f.write(content)
+            if rejected_files:
+                theme.warn(f"  Rejected {len(rejected_files)} unsafe skill filenames: "
+                           f"{', '.join(rejected_files[:5])}")
+        except OSError as e:
+            theme.warn(f"Could not restore skill files: {e}")
+
+    # Restore Telegram config
+    bot_token = backup.get("bot_token")
+    chat_id = backup.get("chat_id")
+    if bot_token or chat_id:
+        tg_path = os.path.join(work_dir, "telegram_config.json")
+        tg = {}
+        if os.path.exists(tg_path):
+            try:
+                with open(tg_path) as f:
+                    tg = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                tg = {}
+        if bot_token:
+            tg["bot_token"] = bot_token
+        if chat_id:
+            tg["chat_id"] = chat_id
+        try:
+            with open(tg_path, "w") as f:
+                json.dump(tg, f, indent=2)
+            try:
+                os.chmod(tg_path, 0o600)
+            except OSError:
+                theme.warn(f"  Could not restrict {tg_path} to 600 — bot token may be world-readable.")
+        except OSError as e:
+            theme.warn(f"Could not write telegram_config.json: {e}")
 
     config_path = os.path.join(os.path.dirname(__file__), "project_config.json")
     try:
@@ -1311,6 +2901,10 @@ def _launch_starling_or_exit(project_dir: str):
         return
 
     import shutil
+    # IMPORTANT: exit dark screen BEFORE execv — the replacement process will
+    # inherit the current terminal state. Without this, the TUI starts inside
+    # our dark-painted alt buffer which causes visual glitches.
+    theme.exit_dark_screen()
     starling_bin = shutil.which("starling")
     if starling_bin:
         print()
@@ -2098,9 +3692,18 @@ Keywords=crewai;starling;agents;
     os.chmod(desktop_path, 0o755)
     print(f"  Desktop shortcut: {desktop_path}")
 
+    # Use subprocess (no shell) so a path containing spaces or shell
+    # metacharacters can't be interpreted. update-desktop-database is
+    # optional — quietly ignore if missing or if it fails.
     try:
-        os.system(f"update-desktop-database {desktop_dir} 2>/dev/null")
-    except Exception:
+        import subprocess
+        subprocess.run(
+            ["update-desktop-database", desktop_dir],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, OSError):
         pass
 
 

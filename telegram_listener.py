@@ -106,9 +106,31 @@ class TelegramListener:
             self._handle_message(text)
 
     def _handle_message(self, text: str):
-        """Parse and route a Telegram command."""
+        """Parse and route a Telegram command.
+
+        Free-text messages (no leading /) used to auto-fire a full crew run
+        with no confirmation. That's a footgun: a casual "hi" would burn
+        through API tokens. Now gated by the `telegram.allow_free_text_crew`
+        config flag (default False) — when off, free text gets a hint reply.
+        """
         if not text.startswith("/"):
-            # Not a command — could be a direct mission
+            allow_free_text = False
+            try:
+                from config_loader import load_project_config
+                cfg = load_project_config() or {}
+                allow_free_text = bool(
+                    (cfg.get("telegram") or {}).get("allow_free_text_crew", False)
+                )
+            except Exception:
+                pass
+            if not allow_free_text:
+                self._reply(
+                    "I only run on commands. Try /crew <mission> to start a crew "
+                    "run, or /help for the command list. (Set "
+                    "`telegram.allow_free_text_crew: true` in project_config.json "
+                    "to let plain messages auto-run a crew.)"
+                )
+                return
             response = self._execute_command("crew", text)
             self._reply(response)
             return

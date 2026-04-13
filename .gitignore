@@ -5,12 +5,14 @@ build/
 dist/
 wheels/
 *.egg-info
+*.egg-info/
 
 # Virtual environments
 .venv
 
 # Secrets
 .env
+.env.local
 telegram_config.json
 
 # Internal dev artifacts
@@ -33,3 +35,10 @@ output/
 skills/
 test_mission_research_report.md
 starling.log
+
+# Editor / OS / runtime backup detritus
+*.bak
+*.bak-*
+*.orig
+.DS_Store
+*.swp

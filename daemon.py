@@ -69,17 +69,18 @@ def start():
 
     import subprocess
     log_path = _log_file()
-    log_fd = open(log_path, "a")
-    # Launch daemon.py directly as a detached process
-    proc = subprocess.Popen(
-        [sys.executable, os.path.join(BASE_DIR, "daemon.py")],
-        stdout=log_fd,
-        stderr=log_fd,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-        cwd=BASE_DIR,
-    )
-    log_fd.close()
+    # Open the log inside a context manager so the FD is always closed even
+    # if Popen raises (e.g. sys.executable missing). Popen dups the FD, so
+    # the child's logging keeps working after we close our copy.
+    with open(log_path, "a") as log_fd:
+        proc = subprocess.Popen(
+            [sys.executable, os.path.join(BASE_DIR, "daemon.py")],
+            stdout=log_fd,
+            stderr=log_fd,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            cwd=BASE_DIR,
+        )
 
     # Write PID immediately
     with open(_pid_file(), "w") as f:

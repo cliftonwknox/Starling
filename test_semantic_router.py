@@ -95,7 +95,7 @@ class TestComputeAgentsHash(unittest.TestCase):
 
 
 class TestSemanticRouterWithConfig(unittest.TestCase):
-    """Tests that use real embeddings against the live Sports Crew config.
+    """Tests that use real embeddings against the live example test config.
 
     These tests require the fastembed model to be available and the
     project_config.json to have agents configured.
@@ -123,10 +123,10 @@ class TestSemanticRouterWithConfig(unittest.TestCase):
         self.assertTrue(result)
 
     def test_semantic_route_sports_query(self):
-        """Integration test — requires Sports Crew config (odds_maker agent)."""
+        """Integration test — requires example test config (odds_maker agent)."""
         from config_loader import get_agent_ids
         if "odds_maker" not in get_agent_ids():
-            self.skipTest("Requires Sports Crew config with odds_maker agent")
+            self.skipTest("Requires example test config with odds_maker agent")
         from semantic_router import semantic_route
         result = semantic_route("research sports odds and betting lines")
         self.assertEqual(result, "odds_maker")
@@ -399,7 +399,7 @@ class TestEndToEnd(unittest.TestCase):
         # Current agents don't have template field, so only primary vectors
         primary_count = len(rows[rows["skill_type"] == "primary"])
         secondary_count = len(rows[rows["skill_type"] == "secondary"])
-        # With current Sports Crew config (no templates), all should be primary
+        # With current example test config (no templates), all should be primary
         self.assertGreater(primary_count, 0)
         # Secondary would be > 0 only if agents have template field set
         # This test documents the behavior — it's a structural check
@@ -409,18 +409,18 @@ class TestEndToEnd(unittest.TestCase):
 class TestAutoRoute(unittest.TestCase):
     """Integration tests for the 3-tier routing cascade in heartbeat.
 
-    These tests assume the Sports Crew config (leader + odds_maker agents with
+    These tests assume the example test config (leader + odds_maker agents with
     specific routing keywords). They skip gracefully on other configs.
     """
 
     @classmethod
     def setUpClass(cls):
         from config_loader import get_agent_ids
-        cls._has_sports_crew = "leader" in get_agent_ids() and "odds_maker" in get_agent_ids()
+        cls._has_test_config = "leader" in get_agent_ids() and "odds_maker" in get_agent_ids()
 
     def test_keyword_wins(self):
-        if not self._has_sports_crew:
-            self.skipTest("Requires Sports Crew config (leader + odds_maker)")
+        if not self._has_test_config:
+            self.skipTest("Requires example test config (leader + odds_maker)")
         from heartbeat import auto_route
         # "decision" is a keyword for leader
         agent, method = auto_route("make a decision about the bet")
@@ -428,8 +428,8 @@ class TestAutoRoute(unittest.TestCase):
         self.assertEqual(method, "keyword")
 
     def test_semantic_fallback(self):
-        if not self._has_sports_crew:
-            self.skipTest("Requires Sports Crew config (leader + odds_maker)")
+        if not self._has_test_config:
+            self.skipTest("Requires example test config (leader + odds_maker)")
         from heartbeat import auto_route
         # No keywords match, but semantic should pick odds_maker
         agent, method = auto_route("research NBA odds and spreads tonight")
@@ -437,8 +437,8 @@ class TestAutoRoute(unittest.TestCase):
         self.assertEqual(agent, "odds_maker")
 
     def test_default_fallback(self):
-        if not self._has_sports_crew:
-            self.skipTest("Requires Sports Crew config (leader + odds_maker)")
+        if not self._has_test_config:
+            self.skipTest("Requires example test config (leader + odds_maker)")
         from heartbeat import auto_route
         agent, method = auto_route("xyzzy random gibberish nonsense completely unrelated")
         self.assertEqual(method, "default")

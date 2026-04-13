@@ -249,8 +249,25 @@ def cmd_show():
     print("╚══════════════════════════════════════════════════════════════╝\n")
     enabled = "✓ Enabled" if config.get("enabled") else "✗ Disabled"
     print(f"  Status:    {enabled}")
-    print(f"  Bot token: {config.get('bot_token', 'not set')[:20]}...")
-    print(f"  Chat ID:   {config.get('chat_id', 'not set')}")
+    # Show only the bot ID prefix (everything before the colon) — the rest of
+    # the token is the HMAC secret. Showing the first 20 chars previously
+    # leaked the full bot ID + several chars of the secret, which speeds up
+    # brute-force if the value is captured from terminal scrollback.
+    bot_token = config.get("bot_token", "")
+    if bot_token:
+        bot_id = bot_token.split(":", 1)[0] if ":" in bot_token else "unknown"
+        token_display = f"{bot_id}:•••••••• (configured)"
+    else:
+        token_display = "not set"
+    print(f"  Bot token: {token_display}")
+    # Chat ID is not a secret (telegram exposes it to the bot operator) but
+    # still mask the middle digits so the value can't be read off a screenshot.
+    chat_id = str(config.get("chat_id", "") or "")
+    if len(chat_id) >= 6:
+        chat_display = f"{chat_id[:3]}…{chat_id[-2:]} ({len(chat_id)} digits)"
+    else:
+        chat_display = chat_id or "not set"
+    print(f"  Chat ID:   {chat_display}")
     print(f"  Max length: {config.get('max_message_length', 4000)} chars")
     print(f"  Include summary: {config.get('include_summary', True)}")
     print(f"\n  Notify on:")

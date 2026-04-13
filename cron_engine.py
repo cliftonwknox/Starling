@@ -167,7 +167,14 @@ def add_cron(name: str, description: str, schedule: str,
 
 
 def remove_cron(job_id: str) -> bool:
-    """Remove a cron job by ID or suffix."""
+    """Remove a cron job by ID or suffix.
+
+    Guard: an empty `job_id` would match every cron job because every string
+    ends with "" — refuse to delete-all by accident.
+    """
+    if not job_id or not job_id.strip():
+        logger.warning("remove_cron called with empty job_id; refusing to delete all jobs")
+        return False
     jobs = _load_crons()
     before = len(jobs)
     jobs = [j for j in jobs if not j["id"].endswith(job_id)]

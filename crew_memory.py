@@ -85,9 +85,12 @@ def _get_embedder():
     """Lazy-load the embedding model. Runs on CPU only — never touches GPU."""
     global _embedder
     if _embedder is None:
+        import os as _os
         from fastembed import TextEmbedding
         from fastembed.common.types import Device
-        _embedder = TextEmbedding(_EMBED_MODEL, cuda=Device.CPU)
+        cache_dir = _os.path.expanduser("~/.cache/starling/embeddings")
+        _os.makedirs(cache_dir, exist_ok=True)
+        _embedder = TextEmbedding(_EMBED_MODEL, cuda=Device.CPU, cache_dir=cache_dir)
         _health["embedder_ok"] = True
         logger.info(f"Embedding model loaded on CPU: {_EMBED_MODEL}")
     return _embedder
@@ -518,21 +521,36 @@ def delete_by_content(agent_id: str, content_fragment: str) -> int:
     Used when JSON entries are superseded — removes the old vector so it
     doesn't pollute search results.
     """
+    # Performance note: LanceDB has no LIKE/CONTAINS — we still need to scan
+    # rows for the fragment match. We pre-filter by agent_id (server-side) so
+    # only that agent's vectors come back to the client, and cap the scan at
+    # SCAN_LIMIT entries per call so a runaway memory store can't OOM the
+    # process. If the cap is hit we log a warning so the user can see growth.
+    SCAN_LIMIT = 2000
     try:
         table = _get_table()
-        # Find matching rows, then delete by entry_id
-        # LanceDB doesn't support LIKE, so we search and delete individually
-        all_rows = table.search().limit(10000).select(
-            ["entry_id", "content", "agent_id"]
-        ).to_list()
+        # Server-side filter to this agent only
+        rows = (
+            table.search()
+            .where(f"agent_id = '{agent_id}'")
+            .limit(SCAN_LIMIT)
+            .select(["entry_id", "content"])
+            .to_list()
+        )
+        if len(rows) == SCAN_LIMIT:
+            logger.warning(
+                f"delete_by_content hit SCAN_LIMIT={SCAN_LIMIT} for agent "
+                f"{agent_id}; older matches may be missed. Consider compacting."
+            )
         fragment_lower = content_fragment.lower()
         deleted = 0
-        for row in all_rows:
-            if (row.get("agent_id") == agent_id
-                    and fragment_lower in row.get("content", "").lower()):
+        for row in rows:
+            if fragment_lower in (row.get("content") or "").lower():
                 eid = row.get("entry_id", "")
                 if eid:
-                    table.delete(f"entry_id = '{eid}'")
+                    # Escape single quotes to keep the SQL fragment safe
+                    safe_eid = eid.replace("'", "''")
+                    table.delete(f"entry_id = '{safe_eid}'")
                     deleted += 1
         if deleted:
             logger.info(f"Deleted {deleted} superseded vectors for agent {agent_id}")
@@ -591,60 +609,96 @@ def purge_stale(agent_id: str) -> int:
 def _enforce_limits() -> dict:
     """Enforce size limits on the vector store.
 
-    Trims the global pool and per-agent vectors to their max sizes,
-    keeping the most recent entries.
+    Trims the global pool and per-agent vectors to their max sizes, keeping
+    the most recent entries. Only fetches the rows that are actually over the
+    limit (instead of the full table) so this stays cheap as the store grows.
     """
     trimmed = {"global": 0, "agents": {}}
     try:
         table = _get_table()
+        # Cheap server-side count first — avoids any data fetch when under limits.
         total = table.count_rows()
         if total == 0:
             return trimmed
 
-        all_rows = table.search().limit(total).select(
-            ["entry_id", "agent_id", "memory_tier", "timestamp"]
-        ).to_list()
+        # --- Trim global pool ---
+        # Use server-side filter + count for "is this even over the limit?"
+        # If the count is at/under the cap we don't read any rows at all.
+        try:
+            global_total = table.count_rows(filter="memory_tier = 'global'")
+        except Exception:
+            # Older lancedb doesn't accept count_rows(filter=...) — fall back
+            # to a scan only when needed.
+            global_total = None
 
-        # Trim global pool
-        global_rows = [r for r in all_rows if r.get("memory_tier") == "global"]
-        if len(global_rows) > _GLOBAL_MAX_ENTRIES:
-            global_rows.sort(key=lambda r: r.get("timestamp", ""))
-            to_remove = global_rows[:len(global_rows) - _GLOBAL_MAX_ENTRIES]
-            for r in to_remove:
-                eid = r.get("entry_id", "")
-                if eid:
-                    try:
-                        table.delete(f"entry_id = '{eid}' AND memory_tier = 'global'")
-                        trimmed["global"] += 1
-                    except Exception:
-                        pass
-            if trimmed["global"]:
-                logger.info(f"Trimmed {trimmed['global']} oldest global memories (limit: {_GLOBAL_MAX_ENTRIES})")
-
-        # Trim per-agent
-        agent_rows = {}
-        for r in all_rows:
-            if r.get("memory_tier") != "global":
-                aid = r.get("agent_id", "")
-                if aid:
-                    agent_rows.setdefault(aid, []).append(r)
-
-        for aid, rows in agent_rows.items():
-            if len(rows) > _AGENT_MAX_VECTORS:
-                rows.sort(key=lambda r: r.get("timestamp", ""))
-                to_remove = rows[:len(rows) - _AGENT_MAX_VECTORS]
-                count = 0
+        if global_total is None or global_total > _GLOBAL_MAX_ENTRIES:
+            global_rows = (
+                table.search()
+                .where("memory_tier = 'global'")
+                .limit(global_total or _GLOBAL_MAX_ENTRIES * 2)
+                .select(["entry_id", "timestamp"])
+                .to_list()
+            )
+            if len(global_rows) > _GLOBAL_MAX_ENTRIES:
+                global_rows.sort(key=lambda r: r.get("timestamp", ""))
+                to_remove = global_rows[:len(global_rows) - _GLOBAL_MAX_ENTRIES]
                 for r in to_remove:
                     eid = r.get("entry_id", "")
                     if eid:
                         try:
-                            table.delete(f"entry_id = '{eid}'")
-                            count += 1
+                            safe_eid = eid.replace("'", "''")
+                            table.delete(f"entry_id = '{safe_eid}' AND memory_tier = 'global'")
+                            trimmed["global"] += 1
                         except Exception:
                             pass
-                if count:
-                    trimmed["agents"][aid] = count
-                    logger.info(f"Trimmed {count} oldest vectors for agent {aid} (limit: {_AGENT_MAX_VECTORS})")
+                if trimmed["global"]:
+                    logger.info(f"Trimmed {trimmed['global']} oldest global memories (limit: {_GLOBAL_MAX_ENTRIES})")
+
+        # --- Trim per-agent ---
+        # Get the distinct agent IDs first (cheap) then check each agent's count
+        # individually. Only read full rows for agents that are over the limit.
+        try:
+            id_rows = (
+                table.search()
+                .where("memory_tier != 'global'")
+                .limit(total)
+                .select(["agent_id"])
+                .to_list()
+            )
+            agent_counts = {}
+            for r in id_rows:
+                aid = r.get("agent_id")
+                if aid:
+                    agent_counts[aid] = agent_counts.get(aid, 0) + 1
+        except Exception:
+            agent_counts = {}
+
+        for aid, count in agent_counts.items():
+            if count <= _AGENT_MAX_VECTORS:
+                continue
+            safe_aid = aid.replace("'", "''")
+            rows = (
+                table.search()
+                .where(f"agent_id = '{safe_aid}' AND memory_tier != 'global'")
+                .limit(count)
+                .select(["entry_id", "timestamp"])
+                .to_list()
+            )
+            rows.sort(key=lambda r: r.get("timestamp", ""))
+            to_remove = rows[:len(rows) - _AGENT_MAX_VECTORS]
+            removed = 0
+            for r in to_remove:
+                eid = r.get("entry_id", "")
+                if eid:
+                    try:
+                        safe_eid = eid.replace("'", "''")
+                        table.delete(f"entry_id = '{safe_eid}'")
+                        removed += 1
+                    except Exception:
+                        pass
+            if removed:
+                trimmed["agents"][aid] = removed
+                logger.info(f"Trimmed {removed} oldest vectors for agent {aid} (limit: {_AGENT_MAX_VECTORS})")
 
     except Exception as e:
         logger.warning(f"Failed to enforce limits: {e}")

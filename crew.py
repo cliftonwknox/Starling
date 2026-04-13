@@ -393,19 +393,33 @@ def build_agents_from_config(project_config: dict, presets: dict) -> dict:
     agents = {}
     llms = {}
 
+    # First pass: validate every preset can build an LLM. Collect failures
+    # and raise a single actionable error before constructing any Agent. This
+    # surfaces config problems at startup with the offending agent name(s)
+    # instead of letting a broken `Agent(llm=None)` blow up later inside
+    # crew.kickoff() with an opaque Pydantic stack trace.
+    llm_failures = []
     for agent_cfg in agents_cfg:
         aid = agent_cfg["id"]
         preset_name = agent_cfg.get("preset")
         if not preset_name:
             raise ValueError(f"Agent '{aid}' has no model preset configured. Run 'starling models' to set one up.")
-
         try:
-            llm = build_llm_from_preset(preset_name, presets)
+            llms[aid] = build_llm_from_preset(preset_name, presets)
         except Exception as e:
-            # Don't crash — agent will fail on use but others work
-            llm = None
+            llm_failures.append(f"  • {aid} (preset '{preset_name}'): {e}")
 
-        llms[aid] = llm
+    if llm_failures:
+        raise ValueError(
+            "One or more agents could not build an LLM from their preset:\n"
+            + "\n".join(llm_failures)
+            + "\n\nFix the preset(s) above (typically a missing API key env var) "
+            "and try again."
+        )
+
+    for agent_cfg in agents_cfg:
+        aid = agent_cfg["id"]
+        llm = llms[aid]
 
         tool_instances = resolve_tools(agent_cfg.get("tools", []), skills_dir)
 

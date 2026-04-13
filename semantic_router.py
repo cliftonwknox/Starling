@@ -24,6 +24,51 @@ logger = logging.getLogger("starling.semantic_router")
 # === Pre-built agent templates (from Grok conversation 2026-04-11) ===
 
 AGENT_TEMPLATES = {
+    "leader": {
+        "name": "Leader / CEO",
+        "role": "Chief Executive",
+        "goal": "Set goals, delegate tasks to the right team members, monitor progress, and deliver a final report when the work is done",
+        "backstory": "Strategic leader who breaks big objectives into actionable plans, "
+                     "delegates to specialists, and keeps the crew focused on the goal. "
+                     "Talks to the user, decides what needs doing, tracks progress, wraps up.",
+        "primary_purpose": "Expert at setting goals, delegating work, and coordinating a team.",
+        "secondary_purposes": [
+            "Progress monitoring and reporting",
+            "Strategic planning and prioritization",
+        ],
+        "tools": [
+            "crewai:FileReadTool",
+            "crewai:DirectoryReadTool",
+            "crewai:DirectorySearchTool",
+            "crewai:PDFSearchTool",
+            "crewai:CSVSearchTool",
+            "crewai:JSONSearchTool",
+            "cron_tool",
+        ],
+        "color": "cyan",
+        "tier": "leader",
+    },
+    "coordinator": {
+        "name": "Team Coordinator",
+        "role": "Team Coordinator",
+        "goal": "Receive objectives from the Leader, break them into concrete tasks, schedule or delegate them to the right specialist, and report results back",
+        "backstory": "Experienced coordinator who turns plans into scheduled work. "
+                     "Owns a sub-team of specialists, knows their strengths, and routes "
+                     "tasks accordingly. Schedules cron jobs for recurring work.",
+        "primary_purpose": "Expert at breaking down tasks and delegating to the right team member.",
+        "secondary_purposes": [
+            "Task scheduling and cron management",
+            "Team capacity tracking",
+        ],
+        "tools": [
+            "crewai:FileReadTool",
+            "crewai:FileWriterTool",
+            "crewai:DirectoryReadTool",
+            "cron_tool",
+        ],
+        "color": "blue",
+        "tier": "coordinator",
+    },
     "researcher": {
         "name": "Researcher",
         "role": "Senior Research Analyst",
@@ -191,9 +236,12 @@ def _get_embedder():
     """Lazy-load the routing embedding model. Runs on CPU only — never touches GPU."""
     global _routing_embedder
     if _routing_embedder is None:
+        import os as _os
         from fastembed import TextEmbedding
         from fastembed.common.types import Device
-        _routing_embedder = TextEmbedding(_ROUTING_MODEL, cuda=Device.CPU)
+        cache_dir = _os.path.expanduser("~/.cache/starling/embeddings")
+        _os.makedirs(cache_dir, exist_ok=True)
+        _routing_embedder = TextEmbedding(_ROUTING_MODEL, cuda=Device.CPU, cache_dir=cache_dir)
         logger.info(f"Routing embedding model loaded on CPU: {_ROUTING_MODEL}")
     return _routing_embedder
 
@@ -294,8 +342,18 @@ def _save_meta(data: dict):
 
 # === LanceDB access (lazy) ===
 
+_db = None
+_db_path = None  # Track the resolved path so we can reconnect if it changes
+
+
 def _get_db():
-    """Get the shared LanceDB connection (same instance as crew_memory)."""
+    """Get a process-singleton LanceDB connection.
+
+    Cached at module scope so repeated routing calls don't reopen the on-disk
+    database every time (mirrors crew_memory._get_db). If the resolved path
+    ever changes (e.g. work dir moved mid-process), we transparently reconnect.
+    """
+    global _db, _db_path
     import lancedb
     try:
         from config_loader import get_memory_dir
@@ -303,7 +361,10 @@ def _get_db():
     except Exception:
         db_path = os.path.join(os.path.dirname(__file__), "memory", "vector_db")
     os.makedirs(db_path, exist_ok=True)
-    return lancedb.connect(db_path)
+    if _db is None or _db_path != db_path:
+        _db = lancedb.connect(db_path)
+        _db_path = db_path
+    return _db
 
 
 def _get_table():
@@ -537,17 +598,41 @@ def record_completed_task(task_id: str, description: str, agent_id: str, complet
 
 
 def _trim_dedup_table(table):
-    """Remove oldest entries to stay within size limit."""
+    """Remove oldest entries to stay within size limit.
+
+    Avoids `to_pandas()` (which would pull pandas as an implicit runtime
+    dependency for what is otherwise a lightweight module). We delete the
+    oldest entries by `completed` timestamp using LanceDB's native API.
+    """
     try:
-        rows = table.to_pandas()
+        # Use the cheap server-side count first.
+        try:
+            current = table.count_rows()
+        except Exception:
+            current = None
+        if current is not None and current <= _DEDUP_MAX_ENTRIES:
+            return
+
+        # Pull only the columns needed for trimming.
+        rows = (
+            table.search()
+            .limit(current or _DEDUP_MAX_ENTRIES * 4)
+            .select(["task_id", "completed"])
+            .to_list()
+        )
         if len(rows) <= _DEDUP_MAX_ENTRIES:
             return
-        # Keep the most recent entries
-        rows = rows.sort_values("completed", ascending=False).head(_DEDUP_MAX_ENTRIES)
-        db = _get_db()
-        if _DEDUP_TABLE in db.table_names():
-            db.drop_table(_DEDUP_TABLE)
-        db.create_table(_DEDUP_TABLE, data=rows, schema=_DEDUP_SCHEMA)
+        rows.sort(key=lambda r: r.get("completed", ""))  # oldest first
+        to_remove = rows[:len(rows) - _DEDUP_MAX_ENTRIES]
+        for r in to_remove:
+            tid = r.get("task_id", "")
+            if not tid:
+                continue
+            safe_tid = tid.replace("'", "''")
+            try:
+                table.delete(f"task_id = '{safe_tid}'")
+            except Exception:
+                pass
     except Exception as e:
         logger.debug(f"Failed to trim dedup table: {e}")
 

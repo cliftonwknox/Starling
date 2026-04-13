@@ -10,12 +10,16 @@ import os
 import threading
 from typing import Optional
 
-# Search order for project config
+# Search order for project config.
+# CREWUI_CONFIG and ~/.config/crewui/ are legacy fallbacks from the pre-rename
+# era (CrewTUI → Starling, 2026-04-11). They WILL be removed in v1.5.0 — users
+# should set STARLING_CONFIG and migrate any config under ~/.config/crewui/ to
+# ~/.config/starling/ before upgrading past v1.4.x.
 _SEARCH_PATHS = [
     os.environ.get("STARLING_CONFIG", os.environ.get("CREWUI_CONFIG", "")),
     os.path.join(os.path.dirname(__file__), "project_config.json"),
     os.path.expanduser("~/.config/starling/project_config.json"),
-    os.path.expanduser("~/.config/crewui/project_config.json"),  # backwards compat
+    os.path.expanduser("~/.config/crewui/project_config.json"),  # legacy, removed in v1.5
 ]
 
 _cached_config: Optional[dict] = None

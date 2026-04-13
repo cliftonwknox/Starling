@@ -45,17 +45,31 @@ def _heartbeat_config_file() -> str:
 
 
 # === Task Queue (disk-backed) ===
+#
+# All queue I/O is serialized through `_queue_lock` because the TUI thread,
+# the heartbeat background thread, the cron engine, and the Telegram listener
+# all mutate task_queue.json. Without this lock, a concurrent write can produce
+# a partial/empty JSON file and silently lose every queued task on disk.
+# Atomic write (tmp + rename) guarantees the on-disk file is never partial
+# even if the process is killed mid-save.
+_queue_lock = threading.RLock()
+
 
 def _load_queue() -> list:
-    if os.path.exists(_queue_file()):
-        with open(_queue_file()) as f:
-            return json.load(f)
-    return []
+    with _queue_lock:
+        if os.path.exists(_queue_file()):
+            with open(_queue_file()) as f:
+                return json.load(f)
+        return []
 
 
 def _save_queue(tasks: list):
-    with open(_queue_file(), "w") as f:
-        json.dump(tasks, f, indent=2)
+    qf = _queue_file()
+    tmp = qf + ".tmp"
+    with _queue_lock:
+        with open(tmp, "w") as f:
+            json.dump(tasks, f, indent=2)
+        os.replace(tmp, qf)
 
 
 def add_task(
@@ -74,31 +88,34 @@ def add_task(
         every: Recurrence interval string, e.g. "6h", "30m", "1d".
         depends_on: List of task ID suffixes this task must wait for.
     """
-    tasks = _load_queue()
-    task = {
-        "id": datetime.now().strftime("%Y%m%d%H%M%S%f")[:18],
-        "description": description,
-        "agent": agent,  # None = CEO auto-delegates
-        "priority": priority,
-        "status": "pending",  # pending, running, done, failed, cancelled
-        "crew": crew,
-        "tags": tags or [],
-        "created": datetime.now().isoformat(),
-        "started": None,
-        "completed": None,
-        "result": None,
-        "error": None,
-        "retries": 0,
-        "max_retries": 1,
-        # Recurring
-        "every": every,  # e.g. "6h", "30m", "1d"
-        "next_run": None,  # ISO timestamp for next recurrence
-        # Dependencies
-        "depends_on": depends_on or [],  # task IDs that must be done first
-    }
-    tasks.append(task)
-    _save_queue(tasks)
-    return task
+    # The full read-modify-write must hold the queue lock so concurrent
+    # add_task / update_task calls cannot interleave and clobber each other.
+    with _queue_lock:
+        tasks = _load_queue()
+        task = {
+            "id": datetime.now().strftime("%Y%m%d%H%M%S%f")[:18],
+            "description": description,
+            "agent": agent,  # None = CEO auto-delegates
+            "priority": priority,
+            "status": "pending",  # pending, running, done, failed, cancelled
+            "crew": crew,
+            "tags": tags or [],
+            "created": datetime.now().isoformat(),
+            "started": None,
+            "completed": None,
+            "result": None,
+            "error": None,
+            "retries": 0,
+            "max_retries": 1,
+            # Recurring
+            "every": every,
+            "next_run": None,
+            # Dependencies
+            "depends_on": depends_on or [],
+        }
+        tasks.append(task)
+        _save_queue(tasks)
+        return task
 
 
 def get_task(task_id: str) -> Optional[dict]:
@@ -116,13 +133,14 @@ def list_tasks(status: Optional[str] = None) -> list:
 
 
 def update_task(task_id: str, **updates) -> Optional[dict]:
-    tasks = _load_queue()
-    for t in tasks:
-        if t["id"] == task_id:
-            t.update(updates)
-            _save_queue(tasks)
-            return t
-    return None
+    with _queue_lock:
+        tasks = _load_queue()
+        for t in tasks:
+            if t["id"] == task_id:
+                t.update(updates)
+                _save_queue(tasks)
+                return t
+        return None
 
 
 def cancel_task(task_id: str) -> bool:
@@ -132,40 +150,41 @@ def cancel_task(task_id: str) -> bool:
 
 def clear_done() -> int:
     """Remove completed/failed/cancelled tasks. Returns count removed."""
-    tasks = _load_queue()
-    before = len(tasks)
-    tasks = [t for t in tasks if t["status"] in ("pending", "running")]
-    _save_queue(tasks)
-    return before - len(tasks)
+    with _queue_lock:
+        tasks = _load_queue()
+        before = len(tasks)
+        tasks = [t for t in tasks if t["status"] in ("pending", "running")]
+        _save_queue(tasks)
+        return before - len(tasks)
 
 
 def _recover_stale_tasks(max_age_minutes: int = 30):
     """Mark tasks stuck in 'running' for too long as failed."""
-    tasks = _load_queue()
-    changed = False
-    now = datetime.now()
-    for t in tasks:
-        if t["status"] != "running":
-            continue
-        started = t.get("started")
-        if not started:
-            # No start time recorded — mark failed immediately
-            t["status"] = "failed"
-            t["error"] = "No start time recorded; marked as stale"
-            t["completed"] = now.isoformat()
-            changed = True
-            continue
-        try:
-            started_dt = datetime.fromisoformat(started)
-            if (now - started_dt).total_seconds() > max_age_minutes * 60:
+    with _queue_lock:
+        tasks = _load_queue()
+        changed = False
+        now = datetime.now()
+        for t in tasks:
+            if t["status"] != "running":
+                continue
+            started = t.get("started")
+            if not started:
                 t["status"] = "failed"
-                t["error"] = f"Stale: running for over {max_age_minutes} minutes"
+                t["error"] = "No start time recorded; marked as stale"
                 t["completed"] = now.isoformat()
                 changed = True
-        except Exception:
-            pass
-    if changed:
-        _save_queue(tasks)
+                continue
+            try:
+                started_dt = datetime.fromisoformat(started)
+                if (now - started_dt).total_seconds() > max_age_minutes * 60:
+                    t["status"] = "failed"
+                    t["error"] = f"Stale: running for over {max_age_minutes} minutes"
+                    t["completed"] = now.isoformat()
+                    changed = True
+            except Exception:
+                pass
+        if changed:
+            _save_queue(tasks)
 
 
 def next_pending() -> Optional[dict]:
@@ -176,10 +195,18 @@ def next_pending() -> Optional[dict]:
     for t in all_tasks:
         if t["status"] != "pending":
             continue
-        # Check recurrence timing
-        if t.get("next_run"):
-            if datetime.now().isoformat() < t["next_run"]:
-                continue  # not time yet
+        # Check recurrence timing — parse both sides as datetime so this
+        # works regardless of whether the stored string includes microseconds
+        # (lexicographic ISO comparison silently mis-orders mismatched precision).
+        nr = t.get("next_run")
+        if nr:
+            try:
+                if datetime.now() < datetime.fromisoformat(nr):
+                    continue  # not time yet
+            except (ValueError, TypeError):
+                # Bad timestamp on disk — treat as immediately due rather than
+                # blocking the task forever.
+                logger.warning(f"Task {t.get('id')}: unparseable next_run={nr!r}; running now")
         # Check dependencies
         deps = t.get("depends_on", [])
         if deps:
@@ -215,7 +242,12 @@ def parse_interval(interval_str: str) -> Optional[timedelta]:
 
 
 def requeue_recurring(task: dict):
-    """If a task has a recurrence interval, re-queue it for the next run."""
+    """If a task has a recurrence interval, re-queue it for the next run.
+
+    The new task's id is captured directly from add_task() so we can target
+    it by id when stamping next_run — never assume tasks[-1] is "ours" since
+    a concurrent add_task call could insert in between.
+    """
     every = task.get("every")
     if not every:
         return
@@ -223,7 +255,7 @@ def requeue_recurring(task: dict):
     if not delta:
         return
     next_run = (datetime.now() + delta).isoformat()
-    add_task(
+    new_task = add_task(
         description=task["description"],
         agent=task.get("agent"),
         priority=task.get("priority", 5),
@@ -232,11 +264,7 @@ def requeue_recurring(task: dict):
         every=every,
         depends_on=task.get("depends_on", []),
     )
-    # Set next_run on the newly created task
-    tasks = _load_queue()
-    if tasks:
-        tasks[-1]["next_run"] = next_run
-        _save_queue(tasks)
+    update_task(new_task["id"], next_run=next_run)
 
 
 def save_task_output(task: dict, result: str):
@@ -391,8 +419,11 @@ class Heartbeat:
         while not self._stop_event.is_set():
             try:
                 self._tick()
-            except Exception:
-                pass  # never crash the loop
+            except Exception as e:
+                # Never crash the loop, but DO log so a systemic bug
+                # (e.g. broken on_tick) is visible in starling_daemon.log
+                # instead of silently swallowed forever.
+                logger.exception(f"Heartbeat tick error: {e}")
             # Sleep in small increments so stop is responsive
             for _ in range(self.interval):
                 if self._stop_event.is_set():
