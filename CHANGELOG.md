@@ -3,6 +3,20 @@
 All notable changes to Starling are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.3.1-alpha] — 2026-04-13
+
+Documentation patch follow-up to v1.3.0-alpha.
+
+### Fixed
+- `.env.example`: `ALIBABA_API_KEY` → `DASHSCOPE_API_KEY` to match the
+  Alibaba/Qwen preset fix from v1.3.0-alpha. Anyone copying the example
+  into a project's `.env` was setting the wrong env var name.
+- `.env.example`: comment for `OPENAI_API_KEY` updated to reflect the
+  current built-in model (GPT-5; older GPT-4o / o1 presets were removed
+  in v1.3.0-alpha).
+
+---
+
 ## [1.3.0-alpha] — 2026-04-13
 
 This release focuses on **wizard polish, full backup/restore, and a

@@ -4,7 +4,7 @@ A config-driven terminal interface for managing multi-agent AI crews.
 Built on CrewAI, designed for anyone who wants to run AI agent teams
 without writing code.
 
-**Current version: 1.3.0-alpha** — see [CHANGELOG.md](CHANGELOG.md) for what's new.
+**Current version: 1.3.1-alpha** — see [CHANGELOG.md](CHANGELOG.md) for what's new.
 
 ## What it does
 
